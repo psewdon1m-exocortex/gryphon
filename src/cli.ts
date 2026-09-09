@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import { loadConfig } from "./config.js";
+import { promptSecret } from "./secret-prompt.js";
 
 interface CliResponse {
   readonly status: number;
@@ -47,7 +48,8 @@ function help(): never {
   process.stderr.write(`Usage:
   gryphon status
   gryphon version
-  gryphon connect SERVICE --bot-token-file PATH --service-token-file PATH --adapter URL [--prefix PREFIX] [--alias ALIAS]
+  gryphon bot list
+  gryphon bot connect ALIAS [--bot-token-file PATH]
   gryphon link issue SERVICE
   gryphon link revoke SERVICE
 `);
@@ -62,15 +64,15 @@ if (argumentsValue[0] === "version") {
   process.exit(0);
 } else if (argumentsValue[0] === "status") {
   result = await request(config.adminSocket, "GET", "/v1/status");
-} else if (argumentsValue[0] === "connect" && argumentsValue[1] !== undefined) {
-  const serviceId = argumentsValue[1];
-  result = await request(config.adminSocket, "POST", "/v1/connections", {
-    serviceId,
-    commandPrefix: option(argumentsValue, "--prefix", false) || serviceId.replace(/-/g, "_"),
-    alias: option(argumentsValue, "--alias", false) || serviceId,
-    adapterUrl: option(argumentsValue, "--adapter"),
-    botToken: secretFile(option(argumentsValue, "--bot-token-file")),
-    serviceToken: secretFile(option(argumentsValue, "--service-token-file")),
+} else if (argumentsValue[0] === "bot" && argumentsValue[1] === "list") {
+  result = await request(config.adminSocket, "GET", "/v1/bots");
+} else if (argumentsValue[0] === "bot" && argumentsValue[1] === "connect" && argumentsValue[2] !== undefined) {
+  const tokenFile = option(argumentsValue, "--bot-token-file", false);
+  const botToken = tokenFile ? secretFile(tokenFile) : await promptSecret("Telegram bot token: ");
+  process.stderr.write("Verifying bot with Telegram...\n");
+  result = await request(config.adminSocket, "POST", "/v1/bots", {
+    alias: argumentsValue[2],
+    botToken,
   });
 } else if (argumentsValue[0] === "link" && argumentsValue[1] === "issue" && argumentsValue[2] !== undefined) {
   result = await request(config.adminSocket, "POST", `/v1/links/${encodeURIComponent(argumentsValue[2])}`);

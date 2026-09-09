@@ -24,33 +24,33 @@ docker network create exocortex-services
 
 The public listener accepts only Telegram webhooks. Services use an authenticated, service-scoped Unix socket for status, linking and notifications. Administrative operations use a different Unix socket (or Windows named pipe) and are intentionally not exposed over TCP.
 
-Put bot and service tokens in owner-readable files. The same service token must be mounted in the target service and passed to `connect`:
+First connect one or more Telegram bots to Gryphon from the privileged CLI. Bot
+tokens stay in operator-owned files and are never sent to Chronos or Saturn:
 
 ```powershell
-node dist/cli.js connect chronos `
-  --bot-token-file C:\secrets\shared-bot.token `
-  --service-token-file C:\secrets\chronos.token `
-  --adapter http://chronos:18280/api/internal/gryphon/command
-
-node dist/cli.js connect saturn `
-  --bot-token-file C:\secrets\shared-bot.token `
-  --service-token-file C:\secrets\saturn.token `
-  --adapter http://saturn:3000/internal/gryphon/command
+node dist/cli.js bot connect main
+node dist/cli.js bot connect private
+node dist/cli.js bot list
 ```
 
-Using another bot token for the second command creates another bot runtime. Reusing the same token reuses the existing runtime regardless of the supplied alias.
+Each connect command prompts for the Telegram bot token without echoing it,
+verifies the bot identity with Telegram and registers the webhook. Gryphon then
+stores its own protected token copy; no operator-created token file is required.
+Use `--bot-token-file PATH` only for non-interactive automation.
 
-When Gryphon runs through Compose, invoke the CLI in a one-off container that
-shares the daemon socket. For example, if operator-managed tokens live below
-`/etc/gryphon` on the host:
+Each service installer provisions one service credential under
+`/etc/gryphon/clients/<service>.token` and mounts the same file read-only into
+that service. In Chronos or Saturn Settings, **Link service function** lists the
+bots above and stores only the selected bot, the fixed service command prefix,
+and the service adapter URL. Multiple services can select the same bot; each can
+also select a different one.
+
+When Gryphon runs through Compose, invoke the interactive CLI in a one-off
+container that shares the daemon's private admin socket:
 
 ```sh
 docker compose run --rm --no-deps \
-  -v /etc/gryphon:/operator-secrets:ro \
-  --entrypoint node gryphon dist/cli.js connect chronos \
-  --bot-token-file /operator-secrets/bots/shared.token \
-  --service-token-file /operator-secrets/clients/chronos.token \
-  --adapter http://chronos:18280/api/internal/gryphon/command
+  --entrypoint node gryphon dist/cli.js bot connect main
 ```
 
 ## Bind through the CLI
@@ -65,7 +65,11 @@ For Compose, replace `node dist/cli.js` with
 `docker compose run --rm --no-deps --entrypoint node gryphon dist/cli.js`; link
 and status commands need no secret-file mount.
 
-The issue command prints a short-lived `/link CODE` command. Send it to the selected bot in a private chat. Codes are single-use and service-scoped. To remove one binding and let the service revoke identity-scoped access before it disappears:
+This second link is deliberately separate from connecting a bot to a service:
+it authorizes one Telegram user to execute that service's commands. The issue
+command prints a short-lived `/link CODE` command. Send it to the bot selected in
+the service UI. Codes are single-use and service-scoped. To remove one user
+binding and let the service revoke identity-scoped access before it disappears:
 
 ```powershell
 node dist/cli.js link revoke chronos
@@ -77,7 +81,8 @@ After linking, use `/chronos`, `/chronos status`, `/saturn drop`, or the compact
 
 - `18380`: public webhook listener; publish only behind HTTPS at `GRYPHON_PUBLIC_ORIGIN`.
 - `/run/gryphon/client.sock`: authenticated, service-scoped status, linking and notifications.
-- admin socket: local operator CLI only.
+- `/run/gryphon-admin/admin.sock`: local operator CLI only; service containers
+  never mount this socket.
 - service adapters: allow only Gryphon and require their per-service bearer token.
 
 Persistent state and generated secret copies live under `GRYPHON_DATA_DIR`. Back up the SQLite database and `secrets/` together. Bot and service tokens are never returned by status or admin responses.

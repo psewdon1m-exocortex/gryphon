@@ -18,6 +18,7 @@ install -d -o root -g root -m 0755 /usr/local/lib/gryphon/app
 cp -R dist /usr/local/lib/gryphon/app/dist
 install -o root -g root -m 0644 package.json /usr/local/lib/gryphon/app/package.json
 install -d -o root -g root -m 0750 /etc/gryphon
+install -d -o root -g gryphon-clients -m 0750 /etc/gryphon/clients
 if [ ! -f /etc/gryphon/gryphon.env ]; then
   cat >/etc/gryphon/gryphon.env <<'EOF'
 # Public HTTPS origin used when registering Telegram webhooks.

@@ -129,6 +129,12 @@ interface RawCallback {
   readonly data?: string;
 }
 
+interface ServiceCredential {
+  readonly serviceId: string;
+  readonly tokenPath: string;
+  readonly connection?: ConnectionRecord;
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 }
@@ -203,29 +209,13 @@ export class GryphonGateway {
     }
   }
 
-  async connect(input: {
-    readonly serviceId: string;
-    readonly commandPrefix: string;
-    readonly adapterUrl: string;
+  async connectBot(input: {
     readonly alias: string;
     readonly botToken: string;
-    readonly serviceToken: string;
-  }): Promise<{ readonly bot: BotRecord; readonly connection: ConnectionRecord; readonly reusedBot: boolean }> {
+  }): Promise<{ readonly bot: BotRecord; readonly reusedBot: boolean }> {
     if (!this.#config.publicOrigin) throw new GryphonError("public_origin_not_configured", 409);
-    if (!SERVICE_ID.test(input.serviceId)) throw new GryphonError("invalid_service_id");
-    if (!COMMAND_PREFIX.test(input.commandPrefix)) throw new GryphonError("invalid_command_prefix");
     if (!SERVICE_ID.test(input.alias)) throw new GryphonError("invalid_bot_alias");
     if (!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(input.botToken)) throw new GryphonError("invalid_bot_token");
-    if (input.serviceToken.length < 24 || input.serviceToken.length > 4_096) throw new GryphonError("invalid_service_token");
-    for (const existing of this.#repository.listConnections()) {
-      try {
-        if (secretEqual(input.serviceToken, readSecret(existing.serviceTokenPath))) throw new GryphonError("service_token_already_used", 409);
-      } catch (error) {
-        if (error instanceof GryphonError && error.code === "service_token_already_used") throw error;
-      }
-    }
-    const adapter = new URL(input.adapterUrl);
-    if (!(["http:", "https:"].includes(adapter.protocol))) throw new GryphonError("invalid_adapter_url");
     const transport = this.#transportFactory(input.botToken);
     const identity = await transport.getMe();
     if (!identity.isBot) throw new GryphonError("telegram_identity_is_not_bot");
@@ -233,7 +223,6 @@ export class GryphonGateway {
     let current = this.#repository.getBotByTelegramId(identity.id);
     const reusedBot = current !== undefined;
     if (current !== undefined && !secretEqual(current.tokenFingerprint, fingerprint)) throw new GryphonError("bot_token_rotation_required", 409);
-    if (this.#repository.getConnectionByService(input.serviceId) !== undefined) throw new GryphonError("service_already_connected", 409);
     if (current === undefined) {
       const tokenPath = path.join(this.#config.dataDirectory, "secrets", `bot-${identity.id}.token`);
       writeSecret(tokenPath, input.botToken);
@@ -248,22 +237,7 @@ export class GryphonGateway {
       }, new Date());
     }
     if (current.state !== "ready") await this.#initializeBot(current);
-    const serviceTokenPath = path.join(this.#config.dataDirectory, "secrets", `service-${input.serviceId}.token`);
-    writeSecret(serviceTokenPath, input.serviceToken);
-    let connection: ConnectionRecord;
-    try {
-      connection = this.#repository.createConnection({
-        serviceId: input.serviceId,
-        botId: current.id,
-        commandPrefix: input.commandPrefix,
-        adapterUrl: adapter.toString(),
-        serviceTokenPath,
-      }, new Date());
-    } catch (error) {
-      try { fs.unlinkSync(serviceTokenPath); } catch { /* best effort */ }
-      throw new GryphonError("connection_conflict", 409);
-    }
-    return { bot: this.#repository.getBotById(current.id)!, connection, reusedBot };
+    return { bot: this.#repository.getBotById(current.id)!, reusedBot };
   }
 
   async #initializeBot(current: BotRecord): Promise<void> {
@@ -287,11 +261,10 @@ export class GryphonGateway {
   }
 
   status(): Readonly<Record<string, unknown>> {
-    const bots = this.#repository.listBots();
     return {
       schema: "exocortex.gryphon.status.v1",
       version: this.#config.version,
-      bots: bots.map((current) => ({ id: current.id, alias: current.alias, telegramBotId: current.telegramBotId, username: current.username, state: current.state })),
+      bots: this.botStatus().bots,
       connections: this.#repository.listConnections().map((current) => ({
         id: current.id,
         serviceId: current.serviceId,
@@ -303,18 +276,50 @@ export class GryphonGateway {
     };
   }
 
-  authenticateService(authorization: string): ConnectionRecord {
+  botStatus(): { readonly schema: string; readonly version: string; readonly bots: readonly Readonly<Record<string, unknown>>[] } {
+    return {
+      schema: "exocortex.gryphon.bots.v1",
+      version: this.#config.version,
+      bots: this.#repository.listBots().map((current) => ({ id: current.id, alias: current.alias, telegramBotId: current.telegramBotId, username: current.username, state: current.state })),
+    };
+  }
+
+  #serviceCredentials(): readonly ServiceCredential[] {
+    const result: ServiceCredential[] = [];
+    try {
+      for (const entry of fs.readdirSync(this.#config.clientsDirectory, { withFileTypes: true })) {
+        const match = /^([a-z][a-z0-9-]{1,47})\.token$/.exec(entry.name);
+        if (entry.isFile() && match?.[1] !== undefined) {
+          const connection = this.#repository.getConnectionByService(match[1]);
+          result.push({
+            serviceId: match[1],
+            tokenPath: path.join(this.#config.clientsDirectory, entry.name),
+            ...(connection === undefined ? {} : { connection }),
+          });
+        }
+      }
+    } catch {
+      // A legacy connection can still authenticate while the shared client directory is being deployed.
+    }
+    for (const connection of this.#repository.listConnections()) {
+      if (!result.some((candidate) => candidate.serviceId === connection.serviceId && candidate.tokenPath === connection.serviceTokenPath)) {
+        result.push({ serviceId: connection.serviceId, tokenPath: connection.serviceTokenPath, connection });
+      }
+    }
+    return result;
+  }
+
+  authenticateService(authorization: string): ServiceCredential {
     const supplied = authorization.replace(/^Bearer\s+/i, "");
     if (!supplied) throw new GryphonError("service_authentication_failed", 401);
-    let match: ConnectionRecord | undefined;
+    let match: ServiceCredential | undefined;
     let readable = false;
-    for (const current of this.#repository.listConnections()) {
-      if (current.state !== "enabled") continue;
+    for (const current of this.#serviceCredentials()) {
       try {
-        const expected = readSecret(current.serviceTokenPath);
+        const expected = readSecret(current.tokenPath);
         readable = true;
         if (secretEqual(supplied, expected)) {
-          if (match !== undefined) throw new GryphonError("ambiguous_service_token", 409);
+          if (match !== undefined && match.serviceId !== current.serviceId) throw new GryphonError("ambiguous_service_token", 409);
           match = current;
         }
       } catch (error) {
@@ -326,18 +331,67 @@ export class GryphonGateway {
     throw new GryphonError("service_authentication_failed", 401);
   }
 
+  serviceBots(authorization: string): Readonly<Record<string, unknown>> {
+    const target = this.authenticateService(authorization);
+    return {
+      schema: "exocortex.gryphon.service-bots.v1",
+      serviceId: target.serviceId,
+      bots: this.#repository.listBots().map((current) => ({
+        id: current.id,
+        alias: current.alias,
+        username: current.username,
+        state: current.state,
+        selected: target.connection?.botId === current.id,
+      })),
+    };
+  }
+
+  connectService(authorization: string, input: { readonly botId: string; readonly commandPrefix: string; readonly adapterUrl: string }): Readonly<Record<string, unknown>> {
+    const target = this.authenticateService(authorization);
+    if (target.connection !== undefined) throw new GryphonError("service_already_connected", 409);
+    const expectedPrefix = target.serviceId.replace(/-/g, "_");
+    if (!COMMAND_PREFIX.test(input.commandPrefix) || input.commandPrefix !== expectedPrefix) throw new GryphonError("invalid_command_prefix");
+    const bot = this.#repository.getBotById(input.botId);
+    if (bot === undefined) throw new GryphonError("bot_not_found", 404);
+    if (bot.state !== "ready") throw new GryphonError("bot_not_ready", 409);
+    let adapter: URL;
+    try { adapter = new URL(input.adapterUrl); } catch { throw new GryphonError("invalid_adapter_url"); }
+    const serviceHost = adapter.hostname === target.serviceId || adapter.hostname.startsWith(`${target.serviceId}.`);
+    if (!(["http:", "https:"].includes(adapter.protocol)) || !serviceHost || adapter.username || adapter.password || adapter.hash) throw new GryphonError("invalid_adapter_url");
+    try {
+      this.#repository.createConnection({
+        serviceId: target.serviceId,
+        botId: bot.id,
+        commandPrefix: input.commandPrefix,
+        adapterUrl: adapter.toString(),
+        serviceTokenPath: target.tokenPath,
+      }, new Date());
+    } catch {
+      throw new GryphonError("connection_conflict", 409);
+    }
+    return this.serviceStatus(authorization);
+  }
+
+  disconnectService(authorization: string): { readonly disconnected: boolean } {
+    const target = this.authenticateService(authorization);
+    return { disconnected: this.#repository.deleteConnection(target.serviceId) };
+  }
+
   serviceStatus(authorization: string): Readonly<Record<string, unknown>> {
     const target = this.authenticateService(authorization);
-    const current = this.#repository.getBotById(target.botId);
-    if (current === undefined) throw new GryphonError("bot_not_found", 404);
-    const binding = this.#repository.getBinding(target.id);
+    const connection = target.connection;
+    const current = connection === undefined ? undefined : this.#repository.getBotById(connection.botId);
+    if (connection !== undefined && current === undefined) throw new GryphonError("bot_not_found", 404);
+    const binding = connection === undefined ? undefined : this.#repository.getBinding(connection.id);
     return {
       schema: "exocortex.gryphon.service-status.v1",
       version: this.#config.version,
       serviceId: target.serviceId,
-      state: target.state,
-      commandPrefix: target.commandPrefix,
-      bot: {
+      state: connection?.state ?? "unlinked",
+      connected: connection !== undefined,
+      commandPrefix: connection?.commandPrefix ?? null,
+      bot: current === undefined ? null : {
+        id: current.id,
         alias: current.alias,
         username: current.username,
         state: current.state,
@@ -347,11 +401,13 @@ export class GryphonGateway {
   }
 
   issueServiceLink(authorization: string): ReturnType<GryphonGateway["issueLink"]> {
-    return this.issueLink(this.authenticateService(authorization).serviceId);
+    const target = this.authenticateService(authorization);
+    return this.issueLink(target.serviceId);
   }
 
   revokeServiceLink(authorization: string): Promise<{ readonly revoked: boolean }> {
-    return this.revokeLink(this.authenticateService(authorization).serviceId);
+    const target = this.authenticateService(authorization);
+    return this.revokeLink(target.serviceId);
   }
 
   issueLink(serviceId: string, now = new Date()): { readonly code: string; readonly expiresAt: string; readonly command: string; readonly botUsername?: string } {
@@ -602,7 +658,8 @@ export class GryphonGateway {
   notify(serviceId: string, authorization: string, input: { readonly text: string; readonly idempotencyKey: string }): { readonly accepted: boolean } {
     const target = this.#repository.getConnectionByService(serviceId);
     if (target === undefined || target.state !== "enabled") throw new GryphonError("connection_not_found", 404);
-    if (this.authenticateService(authorization).id !== target.id) throw new GryphonError("service_authentication_failed", 401);
+    const identity = this.authenticateService(authorization);
+    if (identity.serviceId !== serviceId || identity.connection?.id !== target.id) throw new GryphonError("service_authentication_failed", 401);
     if (input.text.length < 1 || input.text.length > 4_096 || input.idempotencyKey.length < 8 || input.idempotencyKey.length > 128) throw new GryphonError("invalid_notification");
     const binding = this.#repository.getBinding(target.id);
     if (binding === undefined) throw new GryphonError("connection_not_linked", 409);
@@ -617,6 +674,7 @@ export class GryphonGateway {
 
   notifyService(authorization: string, input: { readonly text: string; readonly idempotencyKey: string }): { readonly accepted: boolean } {
     const target = this.authenticateService(authorization);
+    if (target.connection === undefined) throw new GryphonError("connection_not_found", 404);
     return this.notify(target.serviceId, authorization, input);
   }
 }

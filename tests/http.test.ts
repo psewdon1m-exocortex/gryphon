@@ -41,6 +41,7 @@ describe("Gryphon HTTP boundaries", () => {
       publicPort: 18_380,
       adminSocket: path.join(directory, "admin.sock"),
       clientSocket: path.join(directory, "client.sock"),
+      clientsDirectory: path.join(directory, "clients"),
       telegramApiBaseUrl: "https://api.telegram.org/",
       providerTimeoutMs: 1_000,
       webhookMaxBytes: 65_536,
@@ -72,16 +73,35 @@ describe("Gryphon HTTP boundaries", () => {
     try {
       const serviceToken = "chronos-service-token-value-0001";
       const botToken = "10001:abcdefghijklmnopqrstuvwxyzABCDE";
-      const connected = await fetch(`${adminOrigin}/v1/connections`, {
+      fs.mkdirSync(config.clientsDirectory, { recursive: true });
+      fs.writeFileSync(path.join(config.clientsDirectory, "chronos.token"), serviceToken);
+      const connected = await fetch(`${adminOrigin}/v1/bots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ serviceId: "chronos", commandPrefix: "chronos", adapterUrl: "http://chronos.test/api/internal/gryphon/command", alias: "chronos", botToken, serviceToken }),
+        body: JSON.stringify({ alias: "chronos", botToken }),
       });
       expect(connected.status).toBe(201);
       const connectionBody = JSON.stringify(await connected.json());
       expect(connectionBody).not.toContain(botToken);
       expect(connectionBody).not.toContain(serviceToken);
       expect(connectionBody).not.toContain("tokenPath");
+      const botList = await fetch(`${adminOrigin}/v1/bots`);
+      expect(await botList.json()).toMatchObject({ schema: "exocortex.gryphon.bots.v1", bots: [{ alias: "chronos", state: "ready" }] });
+
+      const initialStatus = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
+      expect(initialStatus.status).toBe(200);
+      expect(await initialStatus.json()).toMatchObject({ serviceId: "chronos", connected: false, state: "unlinked", bot: null });
+
+      const available = await fetch(`${clientOrigin}/v1/service/bots`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
+      expect(available.status).toBe(200);
+      const availableBody = await available.json() as { readonly bots: readonly { readonly id: string }[] };
+      expect(availableBody.bots).toHaveLength(1);
+      const serviceConnection = await fetch(`${clientOrigin}/v1/service/connection`, {
+        method: "PUT",
+        headers: { "Authorization": `Bearer ${serviceToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ botId: availableBody.bots[0]!.id, commandPrefix: "chronos", adapterUrl: "http://chronos.test/api/internal/gryphon/command" }),
+      });
+      expect(serviceConnection.status).toBe(201);
 
       const challengeResponse = await fetch(`${clientOrigin}/v1/service/link-challenges`, { method: "POST", headers: { "Authorization": `Bearer ${serviceToken}` } });
       const challenge = await challengeResponse.json() as { readonly command: string };
@@ -103,7 +123,7 @@ describe("Gryphon HTTP boundaries", () => {
 
       const serviceStatus = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
       expect(serviceStatus.status).toBe(200);
-      expect(await serviceStatus.json()).toMatchObject({ version: "0.1.0-test", serviceId: "chronos", binding: { linkedAt: expect.any(String) } });
+      expect(await serviceStatus.json()).toMatchObject({ version: "0.1.0-test", serviceId: "chronos", connected: true, bot: { id: availableBody.bots[0]!.id }, binding: { linkedAt: expect.any(String) } });
       const crossService = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": "Bearer wrong-token" } });
       expect(crossService.status).toBe(401);
 
@@ -122,6 +142,12 @@ describe("Gryphon HTTP boundaries", () => {
       await gateway.drain();
       expect(sent).toContain("chronos linked to this Telegram account.");
       expect(sent).toContain("Chronos reminder");
+
+      const disconnected = await fetch(`${clientOrigin}/v1/service/connection`, { method: "DELETE", headers: { "Authorization": `Bearer ${serviceToken}` } });
+      expect(disconnected.status).toBe(200);
+      expect(await disconnected.json()).toEqual({ disconnected: true });
+      const finalStatus = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
+      expect(await finalStatus.json()).toMatchObject({ serviceId: "chronos", connected: false, state: "unlinked", bot: null, binding: null });
     } finally {
       await Promise.all([close(publicServer), close(adminServer), close(clientServer)]);
       repository.close();

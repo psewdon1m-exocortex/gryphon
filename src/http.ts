@@ -55,6 +55,21 @@ export function createClientServer(gateway: GryphonGateway): http.Server {
       const authorization = String(request.headers.authorization ?? "");
       if (request.method === "GET" && url.pathname === "/v1/health") return send(response, 200, { status: "ok" });
       if (request.method === "GET" && url.pathname === "/v1/service") return send(response, 200, gateway.serviceStatus(authorization));
+      if (request.method === "GET" && url.pathname === "/v1/service/bots") return send(response, 200, gateway.serviceBots(authorization));
+      if (request.method === "PUT" && url.pathname === "/v1/service/connection") {
+        const body = await jsonBody(request, 16_384);
+        if (typeof body !== "object" || body === null) throw new GryphonError("invalid_connection");
+        const value = body as Record<string, unknown>;
+        for (const field of ["botId", "commandPrefix", "adapterUrl"] as const) {
+          if (typeof value[field] !== "string") throw new GryphonError("invalid_connection");
+        }
+        return send(response, 201, gateway.connectService(authorization, {
+          botId: value.botId as string,
+          commandPrefix: value.commandPrefix as string,
+          adapterUrl: value.adapterUrl as string,
+        }));
+      }
+      if (request.method === "DELETE" && url.pathname === "/v1/service/connection") return send(response, 200, gateway.disconnectService(authorization));
       if (request.method === "POST" && url.pathname === "/v1/service/link-challenges") return send(response, 201, gateway.issueServiceLink(authorization));
       if (request.method === "DELETE" && url.pathname === "/v1/service/binding") return send(response, 200, await gateway.revokeServiceLink(authorization));
       if (request.method === "POST" && url.pathname === "/v1/service/notifications") {
@@ -77,20 +92,17 @@ export function createAdminServer(gateway: GryphonGateway): http.Server {
     try {
       const url = new URL(request.url ?? "/", "http://localhost");
       if (request.method === "GET" && url.pathname === "/v1/status") return send(response, 200, gateway.status());
-      if (request.method === "POST" && url.pathname === "/v1/connections") {
+      if (request.method === "GET" && url.pathname === "/v1/bots") return send(response, 200, gateway.botStatus());
+      if (request.method === "POST" && url.pathname === "/v1/bots") {
         const body = await jsonBody(request, 16_384);
-        if (typeof body !== "object" || body === null) throw new GryphonError("invalid_connection");
+        if (typeof body !== "object" || body === null) throw new GryphonError("invalid_bot");
         const value = body as Record<string, unknown>;
-        for (const field of ["serviceId", "commandPrefix", "adapterUrl", "alias", "botToken", "serviceToken"] as const) {
-          if (typeof value[field] !== "string") throw new GryphonError("invalid_connection");
+        for (const field of ["alias", "botToken"] as const) {
+          if (typeof value[field] !== "string") throw new GryphonError("invalid_bot");
         }
-        const result = await gateway.connect({
-          serviceId: value.serviceId as string,
-          commandPrefix: value.commandPrefix as string,
-          adapterUrl: value.adapterUrl as string,
+        const result = await gateway.connectBot({
           alias: value.alias as string,
           botToken: value.botToken as string,
-          serviceToken: value.serviceToken as string,
         });
         return send(response, 201, {
           reusedBot: result.reusedBot,
@@ -100,12 +112,6 @@ export function createAdminServer(gateway: GryphonGateway): http.Server {
             alias: result.bot.alias,
             username: result.bot.username,
             state: result.bot.state,
-          },
-          connection: {
-            id: result.connection.id,
-            serviceId: result.connection.serviceId,
-            commandPrefix: result.connection.commandPrefix,
-            state: result.connection.state,
           },
         });
       }

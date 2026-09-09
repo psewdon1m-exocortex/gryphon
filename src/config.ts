@@ -19,6 +19,7 @@ export interface GryphonConfig {
   readonly publicPort: number;
   readonly adminSocket: string;
   readonly clientSocket: string;
+  readonly clientsDirectory: string;
   readonly telegramApiBaseUrl: string;
   readonly providerTimeoutMs: number;
   readonly webhookMaxBytes: number;
@@ -41,8 +42,9 @@ export function loadConfig(): GryphonConfig {
     publicOrigin,
     publicHost: process.env.GRYPHON_PUBLIC_HOST ?? "127.0.0.1",
     publicPort: integer("GRYPHON_PUBLIC_PORT", 18380, 1, 65_535),
-    adminSocket: process.env.GRYPHON_ADMIN_SOCKET ?? (process.platform === "win32" ? "\\\\.\\pipe\\exocortex-gryphon-admin" : "/run/gryphon/admin.sock"),
+    adminSocket: process.env.GRYPHON_ADMIN_SOCKET ?? (process.platform === "win32" ? "\\\\.\\pipe\\exocortex-gryphon-admin" : "/run/gryphon-admin/admin.sock"),
     clientSocket: process.env.GRYPHON_CLIENT_SOCKET ?? (process.platform === "win32" ? "\\\\.\\pipe\\exocortex-gryphon-client" : "/run/gryphon/client.sock"),
+    clientsDirectory: path.resolve(process.env.GRYPHON_CLIENTS_DIR ?? (process.platform === "win32" ? path.join(dataDirectory, "clients") : "/etc/gryphon/clients")),
     telegramApiBaseUrl: process.env.TELEGRAM_API_BASE_URL ?? "https://api.telegram.org/",
     providerTimeoutMs: integer("TELEGRAM_PROVIDER_TIMEOUT_MS", 10_000, 1_000, 60_000),
     webhookMaxBytes: integer("TELEGRAM_WEBHOOK_MAX_BYTES", 65_536, 4_096, 1_048_576),

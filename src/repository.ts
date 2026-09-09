@@ -245,6 +245,10 @@ export class GryphonRepository {
     return this.getConnectionById(id)!;
   }
 
+  deleteConnection(serviceId: string): boolean {
+    return Number(this.#database.prepare("DELETE FROM connections WHERE service_id=?").run(serviceId).changes) > 0;
+  }
+
   getBinding(connectionId: string): BindingRow | undefined {
     return this.#database.prepare("SELECT * FROM telegram_bindings WHERE connection_id=?").get(connectionId) as unknown as BindingRow | undefined;
   }

@@ -9,9 +9,10 @@ User=gryphon
 Group=gryphon-clients
 Environment=NODE_ENV=production
 Environment=GRYPHON_DATA_DIR=/var/lib/gryphon
+Environment=GRYPHON_CLIENTS_DIR=/etc/gryphon/clients
 Environment=GRYPHON_PUBLIC_HOST=127.0.0.1
 Environment=GRYPHON_PUBLIC_PORT=18380
-Environment=GRYPHON_ADMIN_SOCKET=/run/gryphon/admin.sock
+Environment=GRYPHON_ADMIN_SOCKET=/run/gryphon-admin/admin.sock
 Environment=GRYPHON_CLIENT_SOCKET=/run/gryphon/client.sock
 EnvironmentFile=-/etc/gryphon/gryphon.env
 ExecStart=/usr/bin/node /usr/local/lib/gryphon/app/dist/main.js
@@ -19,7 +20,7 @@ Restart=on-failure
 RestartSec=2s
 StateDirectory=gryphon
 StateDirectoryMode=0700
-RuntimeDirectory=gryphon
+RuntimeDirectory=gryphon gryphon-admin
 RuntimeDirectoryMode=0770
 UMask=0007
 NoNewPrivileges=true
