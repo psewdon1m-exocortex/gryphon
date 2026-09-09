@@ -1,0 +1,25 @@
+{
+  "name": "@exocortex/gryphon",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "gryphon": "dist/cli.js",
+    "gryphond": "dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "verify": "pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "26.3.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

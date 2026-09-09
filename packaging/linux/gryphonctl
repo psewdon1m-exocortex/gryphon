@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec /usr/bin/node /usr/local/lib/gryphon/app/dist/cli.js "$@"

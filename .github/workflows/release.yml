@@ -1,0 +1,45 @@
+name: Gryphon Linux release
+
+on:
+  push:
+    tags:
+      - "gryphon-linux-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "12.3.4"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - name: Build signed-by-checksum release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#gryphon-linux-v}"
+          package_version="$(node -p 'require("./package.json").version')"
+          test "$version" = "$package_version"
+          mkdir -p release/root/packaging/linux
+          cp -R dist release/root/dist
+          cp package.json release/root/package.json
+          cp packaging/linux/install.sh packaging/linux/gryphon.service packaging/linux/gryphonctl packaging/linux/README.md release/root/packaging/linux/
+          for runtime in linux-x64 linux-arm64; do
+            artifact="gryphon-linux-${runtime}.tar.gz"
+            tar -C release/root -czf "release/${artifact}" .
+            checksum="$(sha256sum "release/${artifact}" | cut -d' ' -f1)"
+            printf '{\n  "schema": "exocortex.gryphon.release.v1",\n  "product": "gryphon-linux",\n  "version": "%s",\n  "runtime": "%s",\n  "artifact": "%s",\n  "sha256": "%s"\n}\n' "$version" "$runtime" "$artifact" "$checksum" >"release/gryphon-linux-release-${runtime}.json"
+          done
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
