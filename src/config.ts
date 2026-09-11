@@ -24,6 +24,8 @@ export interface GryphonConfig {
   readonly providerTimeoutMs: number;
   readonly webhookMaxBytes: number;
   readonly webhookMaxConnections: number;
+  readonly kernelOrigin?: string;
+  readonly kernelTokenFile?: string;
 }
 
 function integer(name: string, fallback: number, minimum: number, maximum: number): number {
@@ -36,10 +38,19 @@ export function loadConfig(): GryphonConfig {
   const dataDirectory = path.resolve(process.env.GRYPHON_DATA_DIR ?? "data");
   const publicOrigin = (process.env.GRYPHON_PUBLIC_ORIGIN ?? "").trim().replace(/\/$/, "");
   if (publicOrigin && new URL(publicOrigin).protocol !== "https:") throw new Error("GRYPHON_PUBLIC_ORIGIN must use HTTPS");
+  const kernelOrigin = (process.env.GRYPHON_KERNEL_URL ?? process.env.KERNEL_URL ?? "").trim();
+  const kernelTokenFile = (process.env.GRYPHON_KERNEL_TOKEN_FILE ?? "").trim();
+  if (kernelOrigin) {
+    const url = new URL(kernelOrigin);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("GRYPHON_KERNEL_URL must be a private HTTPS origin");
+  }
+  if (process.env.NODE_ENV === "production" && (!kernelOrigin || !kernelTokenFile)) throw new Error("Gryphon production discovery requires Kernel URL and protected token file");
   return {
     version: process.env.GRYPHON_VERSION ?? packageVersion(),
     dataDirectory,
     publicOrigin,
+    ...(kernelOrigin ? { kernelOrigin } : {}),
+    ...(kernelTokenFile ? { kernelTokenFile: path.resolve(kernelTokenFile) } : {}),
     publicHost: process.env.GRYPHON_PUBLIC_HOST ?? "127.0.0.1",
     publicPort: integer("GRYPHON_PUBLIC_PORT", 18380, 1, 65_535),
     adminSocket: process.env.GRYPHON_ADMIN_SOCKET ?? (process.platform === "win32" ? "\\\\.\\pipe\\exocortex-gryphon-admin" : "/run/gryphon-admin/admin.sock"),

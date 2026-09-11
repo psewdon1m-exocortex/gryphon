@@ -1,0 +1,15 @@
+{$GRYPHON_DOMAIN} {
+  header {
+    -Server
+    X-Robots-Tag "noindex, nofollow, noarchive, nosnippet, noimageindex"
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+  }
+  # Only the authenticated Telegram webhook surface is externally reachable.
+  @webhook {
+    method POST
+    path /v1/telegram/webhook/*
+  }
+  handle @webhook { reverse_proxy 127.0.0.1:18380 }
+  respond 404
+}

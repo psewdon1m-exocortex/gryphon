@@ -4,6 +4,10 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { BotRecord, ConnectionRecord } from "./types.js";
 
+export class RepositoryCapacityError extends Error {
+  constructor() { super("queue_capacity_exceeded"); }
+}
+
 interface BotRow {
   readonly id: string;
   readonly telegram_bot_id: string;
@@ -76,8 +80,12 @@ function connection(row: ConnectionRow): ConnectionRecord {
 
 export class GryphonRepository {
   readonly #database: DatabaseSync;
+  readonly #limits: { readonly records: number; readonly bytes: number };
 
-  constructor(filename: string) {
+  constructor(filename: string, limits = { records: 100_000, bytes: 64 * 1024 * 1024 }) {
+    if (!Number.isSafeInteger(limits.records) || limits.records < 1 || limits.records > 100_000 || !Number.isSafeInteger(limits.bytes) || limits.bytes < 1 || limits.bytes > 64 * 1024 * 1024)
+      throw new Error("Invalid repository retention limits");
+    this.#limits = limits;
     fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
     this.#database = new DatabaseSync(filename);
     this.#database.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;");
@@ -159,9 +167,43 @@ export class GryphonRepository {
       );
     `);
     this.#database.exec("UPDATE telegram_updates SET state='queued' WHERE state='processing'; UPDATE delivery_outbox SET state='queued' WHERE state='processing';");
+    this.#database.exec(`CREATE TABLE IF NOT EXISTS queue_sizes (name TEXT PRIMARY KEY, records INTEGER NOT NULL, bytes INTEGER NOT NULL);`);
+    for (const [table, payload] of [["telegram_updates", "body_json"], ["delivery_outbox", "payload_json"], ["callbacks", "arguments_json"]] as const) {
+      this.#database.exec(`
+        INSERT OR REPLACE INTO queue_sizes SELECT '${table}',count(*),coalesce(sum(length(CAST(${payload} AS BLOB))),0) FROM ${table};
+        CREATE TRIGGER IF NOT EXISTS ${table}_size_insert AFTER INSERT ON ${table} BEGIN
+          UPDATE queue_sizes SET records=records+1,bytes=bytes+length(CAST(NEW.${payload} AS BLOB)) WHERE name='${table}'; END;
+        CREATE TRIGGER IF NOT EXISTS ${table}_size_update AFTER UPDATE OF ${payload} ON ${table} BEGIN
+          UPDATE queue_sizes SET bytes=bytes+length(CAST(NEW.${payload} AS BLOB))-length(CAST(OLD.${payload} AS BLOB)) WHERE name='${table}'; END;
+        CREATE TRIGGER IF NOT EXISTS ${table}_size_delete AFTER DELETE ON ${table} BEGIN
+          UPDATE queue_sizes SET records=records-1,bytes=bytes-length(CAST(OLD.${payload} AS BLOB)) WHERE name='${table}'; END;
+      `);
+    }
+    this.maintain(new Date());
+    fs.chmodSync(filename, 0o600);
   }
 
   close(): void { this.#database.close(); }
+
+  /** Retain deduplication tombstones for 30 days; capacity never evicts a live tombstone or pending job. */
+  maintain(now: Date): void {
+    const cutoff = new Date(now.getTime() - 30 * 86_400_000).toISOString();
+    this.transaction(() => {
+      this.#database.prepare("DELETE FROM telegram_updates WHERE state='completed' AND completed_at<?").run(cutoff);
+      this.#database.prepare("DELETE FROM delivery_outbox WHERE state='completed' AND completed_at<?").run(cutoff);
+      this.#database.prepare("DELETE FROM callbacks WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
+      this.#database.prepare("DELETE FROM link_challenges WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
+      this.#database.exec("UPDATE telegram_updates SET body_json='{}' WHERE state='completed' AND body_json<>'{}'; UPDATE delivery_outbox SET payload_json='{}' WHERE state='completed' AND payload_json<>'{}';");
+    });
+    this.#database.exec("PRAGMA wal_checkpoint(PASSIVE);");
+  }
+
+  #requireCapacity(table: "telegram_updates" | "delivery_outbox" | "callbacks", json: string): void {
+    const bytes = Buffer.byteLength(json);
+    const size = this.#database.prepare("SELECT records,bytes FROM queue_sizes WHERE name=?").get(table) as { records: number; bytes: number };
+    if (bytes > 65_536 || size.records >= Math.min(table === "callbacks" ? 10_000 : 100_000, this.#limits.records) || size.bytes + bytes > this.#limits.bytes)
+      throw new RepositoryCapacityError();
+  }
 
   transaction<T>(work: () => T): T {
     this.#database.exec("BEGIN IMMEDIATE");
@@ -283,6 +325,8 @@ export class GryphonRepository {
   }
 
   acceptUpdate(botId: string, updateId: string, body: unknown, now: Date): boolean {
+    if (this.#database.prepare("SELECT 1 FROM telegram_updates WHERE bot_id=? AND update_id=?").get(botId, updateId) !== undefined) return false;
+    this.#requireCapacity("telegram_updates", JSON.stringify(body));
     return Number(this.#database.prepare(`INSERT OR IGNORE INTO telegram_updates
       (bot_id,update_id,body_json,state,next_attempt_at,received_at) VALUES (?,?,?,'queued',?,?)`)
       .run(botId, updateId, JSON.stringify(body), now.toISOString(), now.toISOString()).changes) > 0;
@@ -301,7 +345,7 @@ export class GryphonRepository {
   }
 
   completeUpdate(botId: string, updateId: string, now: Date): void {
-    this.#database.prepare("UPDATE telegram_updates SET state='completed',completed_at=?,last_error=NULL WHERE bot_id=? AND update_id=?")
+    this.#database.prepare("UPDATE telegram_updates SET state='completed',completed_at=?,last_error=NULL,body_json='{}' WHERE bot_id=? AND update_id=?")
       .run(now.toISOString(), botId, updateId);
   }
 
@@ -311,6 +355,7 @@ export class GryphonRepository {
   }
 
   createCallback(input: { readonly token: string; readonly connectionId: string; readonly telegramUserId: string; readonly chatId: string; readonly command: string; readonly arguments: Readonly<Record<string, unknown>>; readonly expiresAt: Date }): void {
+    this.#requireCapacity("callbacks", JSON.stringify(input.arguments));
     this.#database.prepare(`INSERT INTO callbacks
       (token,connection_id,telegram_user_id,telegram_chat_id,command,arguments_json,expires_at)
       VALUES (?,?,?,?,?,?,?)`).run(
@@ -334,6 +379,8 @@ export class GryphonRepository {
   }
 
   enqueueDelivery(input: { readonly id: string; readonly botId: string; readonly chatId: string; readonly payload: Readonly<Record<string, unknown>>; readonly idempotencyKey: string; readonly now: Date }): boolean {
+    if (this.#database.prepare("SELECT 1 FROM delivery_outbox WHERE idempotency_key=?").get(input.idempotencyKey) !== undefined) return false;
+    this.#requireCapacity("delivery_outbox", JSON.stringify(input.payload));
     return Number(this.#database.prepare(`INSERT OR IGNORE INTO delivery_outbox
       (id,bot_id,chat_id,payload_json,idempotency_key,state,next_attempt_at,created_at)
       VALUES (?,?,?,?,?,'queued',?,?)`).run(
@@ -354,7 +401,7 @@ export class GryphonRepository {
   }
 
   completeDelivery(id: string, now: Date): void {
-    this.#database.prepare("UPDATE delivery_outbox SET state='completed',completed_at=?,last_error=NULL WHERE id=?")
+    this.#database.prepare("UPDATE delivery_outbox SET state='completed',completed_at=?,last_error=NULL,payload_json='{}' WHERE id=?")
       .run(now.toISOString(), id);
   }
 

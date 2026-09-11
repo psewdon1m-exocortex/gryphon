@@ -24,8 +24,10 @@ docker network create exocortex-services
 
 The public listener accepts only Telegram webhooks. Services use an authenticated, service-scoped Unix socket for status, linking and notifications. Administrative operations use a different Unix socket (or Windows named pipe) and are intentionally not exposed over TCP.
 
-First connect one or more Telegram bots to Gryphon from the privileged CLI. Bot
-tokens stay in operator-owned files and are never sent to Chronos or Saturn:
+For the initial six-service deployment, Saturn Settings can install Gryphon and
+register a bot through typed, authenticated Updater operations. The bot token is
+transient input; only Gryphon retains its protected copy. The privileged CLI
+provides the same bot registration operation:
 
 ```powershell
 node dist/cli.js bot connect main
@@ -81,7 +83,7 @@ After linking, use `/chronos`, `/chronos status`, `/saturn drop`, or the compact
 
 - `18380`: public webhook listener; publish only behind HTTPS at `GRYPHON_PUBLIC_ORIGIN`.
 - `/run/gryphon/client.sock`: authenticated, service-scoped status, linking and notifications.
-- `/run/gryphon-admin/admin.sock`: local operator CLI only; service containers
+- `/run/gryphon-admin/admin.sock`: local operator CLI and typed Updater operations; service containers
   never mount this socket.
 - service adapters: allow only Gryphon and require their per-service bearer token.
 
@@ -91,14 +93,16 @@ Persistent state and generated secret copies live under `GRYPHON_DATA_DIR`. Back
 
 Release tags use `gryphon-linux-vX.Y.Z`. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
-first installation, extract an archive and run `packaging/linux/install.sh` as
-root, then set `GRYPHON_PUBLIC_ORIGIN` in `/etc/gryphon/gryphon.env` and start
-`gryphon.service`.
+first installation, use Saturn Settings → Bot connection → Install Gryphon.
+Updater verifies the signed archive, provisions the host daemon and connects
+Saturn. A healthy existing host instance is reused. A manual installation may
+run the verified `packaging/linux/install.sh` as root; provision Kernel bootstrap
+URL/token so subsequent public and adapter addresses are resolved through Kernel.
 
 Subsequent updates are performed by Updater through
 `/v1/components/gryphon-linux/check` and
 `/v1/components/gryphon-linux/update`. Updater resolves
-`repositories.gryphon.url` from Kernel Register, verifies the release checksum,
+`repositories.gryphon.url` from Kernel Register, verifies the release signature and checksum,
 atomically swaps the app directory, restarts Gryphon, checks the client socket,
 and restores the previous directory if health does not recover.
 
@@ -107,3 +111,5 @@ and restores the previous directory if health does not recover.
 ```powershell
 corepack pnpm verify
 ```
+
+The current six-service deployment, trust, recovery and acceptance contract is documented in [Deployment readiness](DEPLOYMENT_READINESS.md).

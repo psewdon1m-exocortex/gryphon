@@ -3,6 +3,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import path from "node:path";
 import type { GryphonConfig } from "./config.js";
 import { GryphonError, GryphonGateway } from "./gateway.js";
+import { RepositoryCapacityError } from "./repository.js";
 
 async function jsonBody(request: IncomingMessage, maximumBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
@@ -21,11 +22,15 @@ async function jsonBody(request: IncomingMessage, maximumBytes: number): Promise
 }
 
 function send(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  response.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow, noarchive, nosnippet, noimageindex", "X-Content-Type-Options": "nosniff" });
   response.end(JSON.stringify(body));
 }
 
 function fail(response: ServerResponse, error: unknown): void {
+  if (error instanceof RepositoryCapacityError) {
+    response.setHeader("Retry-After", "60");
+    return send(response, 503, { error: "queue_capacity_exceeded" });
+  }
   const value = error instanceof GryphonError ? error : new GryphonError("internal_error", 500);
   send(response, value.status, { error: value.code });
 }

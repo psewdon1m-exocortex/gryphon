@@ -20,9 +20,15 @@ await Promise.all([
 
 const timer = setInterval(() => { void gateway.drain(); }, 1_000);
 timer.unref();
+const maintenanceTimer = setInterval(() => { repository.maintain(new Date()); }, 60_000);
+maintenanceTimer.unref();
+const discoveryTimer = setInterval(() => { void gateway.initialize(); }, 5 * 60_000);
+discoveryTimer.unref();
 
 async function shutdown(): Promise<void> {
   clearInterval(timer);
+  clearInterval(maintenanceTimer);
+  clearInterval(discoveryTimer);
   await Promise.all([publicServer, adminServer, clientServer].map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
   repository.close();
 }

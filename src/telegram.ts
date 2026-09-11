@@ -1,4 +1,5 @@
 import type { TelegramBotIdentity, TelegramTransport } from "./types.js";
+import { nativeFetch } from "./http-transport.js";
 
 interface TelegramEnvelope<T> {
   readonly ok: boolean;
@@ -27,7 +28,7 @@ export class TelegramHttpTransport implements TelegramTransport {
 
   async #request<T>(method: string, body: Readonly<Record<string, unknown>>): Promise<T> {
     try {
-      const response = await fetch(new URL(`./bot${this.#token}/${method}`, this.#baseUrl), {
+      const response = await nativeFetch(new URL(`./bot${this.#token}/${method}`, this.#baseUrl), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),

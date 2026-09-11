@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "service": "gryphon",
+  "exposure_modes": [
+    "private",
+    "concealed"
+  ],
+  "profiles": {
+    "backup_restore": {
+      "applicable": true,
+      "evidence": [
+        "DEPLOYMENT_READINESS.md",
+        "src/repository.ts",
+        "tests/retention.test.ts"
+      ]
+    },
+    "service_update": {
+      "applicable": true,
+      "evidence": [
+        "DEPLOYMENT_READINESS.md",
+        "packaging/linux/install.sh",
+        ".github/workflows/release.yml"
+      ]
+    },
+    "internal_documentation": {
+      "applicable": false,
+      "reason": "This helper has no independent web Documentation view; connected head interfaces provide operator workflows, and the repository ships technical instructions."
+    },
+    "technical_documentation": {
+      "applicable": true,
+      "evidence": [
+        "README.md",
+        "DEPLOYMENT_READINESS.md"
+      ]
+    },
+    "security": {
+      "applicable": true,
+      "evidence": [
+        "src/http.ts",
+        "tests/http.test.ts"
+      ]
+    },
+    "public_seo_geo": {
+      "applicable": false,
+      "reason": "This service has no deliberately public/indexable content; crawler exclusion is checked in the private/concealed profile."
+    },
+    "private_concealed": {
+      "applicable": true,
+      "evidence": [
+        "DEPLOYMENT_READINESS.md",
+        "src/http.ts",
+        "tests/http.test.ts"
+      ]
+    }
+  }
+}

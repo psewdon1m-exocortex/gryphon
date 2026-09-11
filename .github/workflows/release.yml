@@ -33,12 +33,24 @@ jobs:
           cp -R dist release/root/dist
           cp package.json release/root/package.json
           cp packaging/linux/install.sh packaging/linux/gryphon.service packaging/linux/gryphonctl packaging/linux/README.md release/root/packaging/linux/
+          node_version="$(node -p 'process.version')"
+          curl --fail --silent --show-error --proto '=https' --proto-redir '=https' "https://nodejs.org/dist/${node_version}/SHASUMS256.txt" -o release/SHASUMS256.txt
           for runtime in linux-x64 linux-arm64; do
+            node_archive="node-${node_version}-${runtime}.tar.xz"
+            curl --fail --silent --show-error --proto '=https' --proto-redir '=https' "https://nodejs.org/dist/${node_version}/${node_archive}" -o "release/${node_archive}"
+            (cd release && grep "  ${node_archive}$" SHASUMS256.txt | sha256sum --check --strict -)
+            mkdir -p release/root/runtime
+            tar -xJOf "release/${node_archive}" "node-${node_version}-${runtime}/bin/node" > release/root/runtime/node
+            chmod 0755 release/root/runtime/node
             artifact="gryphon-linux-${runtime}.tar.gz"
             tar -C release/root -czf "release/${artifact}" .
             checksum="$(sha256sum "release/${artifact}" | cut -d' ' -f1)"
             printf '{\n  "schema": "exocortex.gryphon.release.v1",\n  "product": "gryphon-linux",\n  "version": "%s",\n  "runtime": "%s",\n  "artifact": "%s",\n  "sha256": "%s"\n}\n' "$version" "$runtime" "$artifact" "$checksum" >"release/gryphon-linux-release-${runtime}.json"
           done
+      - name: Sign trusted release manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: node scripts/sign-release.mjs release/gryphon-linux-release-linux-x64.json release/gryphon-linux-release-linux-arm64.json
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}

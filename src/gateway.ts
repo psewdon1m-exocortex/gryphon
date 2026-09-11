@@ -4,6 +4,8 @@ import path from "node:path";
 import type { GryphonConfig } from "./config.js";
 import { GryphonRepository } from "./repository.js";
 import { TelegramHttpTransport } from "./telegram.js";
+import { registeredOrigin } from "./kernel.js";
+import { nativeFetch } from "./http-transport.js";
 import type {
   AdapterDispatcher,
   BotRecord,
@@ -93,8 +95,9 @@ function response(value: unknown): CommandResponse {
 const defaultDispatcher: AdapterDispatcher = async (connection, token, envelope) => {
   let remote: Response;
   try {
-    remote = await fetch(connection.adapterUrl, {
+    remote = await nativeFetch(connection.adapterUrl, {
       method: "POST",
+      redirect: "error",
       headers: {
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
@@ -182,6 +185,7 @@ export class GryphonGateway {
   readonly #pepper: Buffer;
   readonly #transportFactory: TransportFactory;
   readonly #adapterDispatcher: AdapterDispatcher;
+  readonly #registeredOrigins = new Map<string, string>();
   #draining = false;
 
   constructor(input: {
@@ -200,7 +204,10 @@ export class GryphonGateway {
       baseUrl: this.#config.telegramApiBaseUrl,
       timeoutMs: this.#config.providerTimeoutMs,
     }));
-    this.#adapterDispatcher = input.adapterDispatcher ?? defaultDispatcher;
+    this.#adapterDispatcher = input.adapterDispatcher ?? (async (connection, token, envelope) => {
+      const origin = await registeredOrigin(this.#config, connection.serviceId);
+      return defaultDispatcher({ ...connection, adapterUrl: new URL("/internal/gryphon/command", origin).toString() }, token, envelope);
+    });
   }
 
   async initialize(): Promise<void> {
@@ -213,7 +220,7 @@ export class GryphonGateway {
     readonly alias: string;
     readonly botToken: string;
   }): Promise<{ readonly bot: BotRecord; readonly reusedBot: boolean }> {
-    if (!this.#config.publicOrigin) throw new GryphonError("public_origin_not_configured", 409);
+    if (!this.#config.publicOrigin && !this.#config.kernelOrigin) throw new GryphonError("public_origin_not_configured", 409);
     if (!SERVICE_ID.test(input.alias)) throw new GryphonError("invalid_bot_alias");
     if (!/^\d{5,}:[A-Za-z0-9_-]{20,}$/.test(input.botToken)) throw new GryphonError("invalid_bot_token");
     const transport = this.#transportFactory(input.botToken);
@@ -236,7 +243,7 @@ export class GryphonGateway {
         webhookSecret: randomBytes(32).toString("base64url"),
       }, new Date());
     }
-    if (current.state !== "ready") await this.#initializeBot(current);
+    await this.#initializeBot(current);
     return { bot: this.#repository.getBotById(current.id)!, reusedBot };
   }
 
@@ -246,12 +253,14 @@ export class GryphonGateway {
       const transport = this.#transportFactory(readSecret(current.tokenPath));
       const identity = await transport.getMe();
       if (!identity.isBot || identity.id !== current.telegramBotId) throw new GryphonError("bot_identity_changed");
-      if (this.#config.publicOrigin) {
+      const origin = this.#config.kernelOrigin ? await registeredOrigin(this.#config, "gryphon") : this.#config.publicOrigin;
+      if (origin && (current.state !== "ready" || this.#registeredOrigins.get(current.id) !== origin)) {
         await transport.setWebhook({
-          url: `${this.#config.publicOrigin}/v1/telegram/webhook/${current.webhookKey}`,
+          url: `${origin}/v1/telegram/webhook/${current.webhookKey}`,
           secretToken: current.webhookSecret,
           maxConnections: this.#config.webhookMaxConnections,
         });
+        this.#registeredOrigins.set(current.id, origin);
       }
       this.#repository.setBotState(current.id, "ready", new Date());
     } catch (error) {
@@ -356,8 +365,8 @@ export class GryphonGateway {
     if (bot.state !== "ready") throw new GryphonError("bot_not_ready", 409);
     let adapter: URL;
     try { adapter = new URL(input.adapterUrl); } catch { throw new GryphonError("invalid_adapter_url"); }
-    const serviceHost = adapter.hostname === target.serviceId || adapter.hostname.startsWith(`${target.serviceId}.`);
-    if (!(["http:", "https:"].includes(adapter.protocol)) || !serviceHost || adapter.username || adapter.password || adapter.hash) throw new GryphonError("invalid_adapter_url");
+    const serviceHost = this.#config.kernelOrigin ? adapter.protocol === "https:" : adapter.hostname === target.serviceId || adapter.hostname.startsWith(`${target.serviceId}.`);
+    if (!(["http:", "https:"].includes(adapter.protocol)) || !serviceHost || adapter.username || adapter.password || adapter.hash || adapter.search) throw new GryphonError("invalid_adapter_url");
     try {
       this.#repository.createConnection({
         serviceId: target.serviceId,
