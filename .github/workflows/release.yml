@@ -50,8 +50,8 @@ jobs:
       - name: Sign trusted release manifest
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
-        run: node scripts/sign-release.mjs release/gryphon-linux-release-linux-x64.json release/gryphon-linux-release-linux-arm64.json
+        run: node scripts/sign-release.mjs --export-public-key release/gryphon.pem release/gryphon-linux-release-linux-x64.json release/gryphon-linux-release-linux-arm64.json
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json release/*.pem --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

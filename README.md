@@ -94,7 +94,8 @@ Persistent state and generated secret copies live under `GRYPHON_DATA_DIR`. Back
 Release tags use `gryphon-linux-vX.Y.Z`. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
 first installation, use Saturn Settings → Bot connection → Install Gryphon.
-Updater verifies the signed archive, provisions the host daemon and connects
+Updater obtains and pins `gryphon.pem` from the selected HTTPS release when the
+host has no existing key, verifies the signed archive, provisions the host daemon and connects
 Saturn. A healthy existing host instance is reused. A manual installation may
 run the verified `packaging/linux/install.sh` as root; provision Kernel bootstrap
 URL/token so subsequent public and adapter addresses are resolved through Kernel.
