@@ -1,10 +1,10 @@
 # gryphon deployment and recovery contract
 
 This service-local record is subordinate to the coordinated
-[Part 11 deployment profile](../.docs/PART_11_INITIAL_MULTI_SERVICE_DEPLOYMENT.md)
+[Part 11 deployment profile](https://github.com/psewdon1m-exocortex/general/blob/main/PART_11_INITIAL_MULTI_SERVICE_DEPLOYMENT.md)
 and the shared-agent contracts in
-[Part 09](../.docs/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
-[Part 10](../.docs/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
+[Part 09](https://github.com/psewdon1m-exocortex/general/blob/main/PART_09_SERVICE_AGENTS_DEPLOYMENT_AND_LIFECYCLE.md) and
+[Part 10](https://github.com/psewdon1m-exocortex/general/blob/main/PART_10_SERVICE_AGENTS_UI_AND_OPERATOR_WORKFLOWS.md).
 
 Gryphon is installed once per host and connected only to consuming services. In the initial six-service profile Saturn is its consumer. The signed release bundles its Node runtime. Bounded native HTTP transport supports the production jitless sandbox without the WebAssembly parser required by built-in fetch. The public proxy exposes only Telegram webhook POST routes; administration and service control use separate Unix sockets. Saturn sends typed installation and transient bot registration through Updater and never mounts the privileged socket. Gryphon owns bot/service tokens and identity bindings; ordinary infrastructure secrets remain in Volt. Current webhook and adapter addresses are discovered through Kernel. Persistent queues and deduplication history have size/count limits, completed payloads are cleared and capacity exhaustion applies backpressure.
 
