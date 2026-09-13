@@ -1,15 +1,21 @@
-name: Gryphon Linux release
+name: Release Gryphon
 
 on:
   push:
     tags:
-      - "gryphon-linux-v*"
+      - "gryphon-v*"
 
 permissions:
   contents: write
 
 jobs:
+  quality-gate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: quality-gate
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +32,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#gryphon-linux-v}"
+          version="${GITHUB_REF_NAME#gryphon-v}"
+          [[ "$GITHUB_REF_NAME" == "gryphon-v${version}" ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           package_version="$(node -p 'require("./package.json").version')"
           test "$version" = "$package_version"
           mkdir -p release/root/packaging/linux
@@ -54,4 +62,11 @@ jobs:
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json release/*.pem --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists and will not be replaced." >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json release/*.pem \
+            --verify-tag --latest=false --title "$GITHUB_REF_NAME" --generate-notes

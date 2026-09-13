@@ -127,11 +127,10 @@ healthy existing host instance is reused. Gryphon keeps its own mode-`0600`
 `/etc/gryphon/gryphon.env`; provision Kernel URL/token so subsequent public and
 adapter addresses are resolved through Kernel.
 
-> Current implementation gap (2026-09-13): the repository workflows still
-> listen to legacy `gryphon-linux-v*` release tags and do not run verification
-> for plain `v*` tags. Those trigger rules are superseded by the contract above.
-> A separate CI change to `gryphon-v*` plus plain-tag verification is required
-> before the next release; legacy tags remain immutable historical records.
+The CI workflow also accepts plain `v*` tags for verification-only evidence;
+only the exact `gryphon-v*` namespace reaches the protected release job.
+Legacy `gryphon-linux-v*` tags remain immutable historical records and no
+longer trigger publication.
 
 Subsequent updates are performed by Updater through
 `/v1/components/gryphon-linux/check` and
