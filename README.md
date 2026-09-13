@@ -1,5 +1,21 @@
 # Gryphon
 
+> Documentation authority: the workspace-wide [Part 00](../.docs/PART_00_SYSTEM_UNIFICATION_SPECIFICATION.md)
+> and its applicable Parts are normative. This repository documents
+> Gryphon-specific details only; a conflict is corrected here and a material
+> implementation difference follows the Part 00 divergence protocol.
+
+## Required pre-push gate
+
+After native checks and before every push, complete the checks required by
+[Part 06 — Unified acceptance checklist](../.docs/PART_06_UNIFIED_ACCEPTANCE_CHECKLIST.md) and run the versioned policy in
+`.github/pre-push-gate.json` through `scripts/pre-push-gate.py`. CI repeats the
+gate on `main`. Security is always reviewed; backup/restore, updater, embedded
+Documentation and affected technical docs are reviewed when relevant. Apply
+SEO/GEO checks to intentionally public/indexable surfaces and concealment,
+crawler and probe-resistance checks to private or authenticated surfaces.
+Every area requires `PASS` evidence or a reasoned `N/A`.
+
 Gryphon is the single Telegram transport gateway for Exocortex services. It owns bot tokens, webhooks, update deduplication, service-scoped identity bindings, callback buttons and outbound delivery. Chronos and Saturn expose authenticated internal command adapters and do not talk to Telegram directly.
 
 One service connection selects one bot. Different services may use the same token (one shared Telegram receiver) or different tokens (independent receivers). A binding belongs to the service connection, not globally to the bot, so the same Telegram account can link Chronos without automatically gaining access to Saturn.
@@ -94,7 +110,9 @@ Persistent state and generated secret copies live under `GRYPHON_DATA_DIR`. Back
 
 ## Native Linux service and updates
 
-Release tags use `gryphon-linux-vX.Y.Z`. The release workflow produces
+Release tags use `gryphon-vMAJOR.MINOR.PATCH` and the version sequence starts
+at `0.0.1`. A plain `v0.0.1`-style tag runs verification-only CI and cannot
+publish or mutate a release. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
 first installation, use Saturn Settings → Bot connection → Install Gryphon.
 Gryphon's private signing key remains only in GitHub Secrets; the protected
@@ -108,6 +126,12 @@ fingerprint or public key downloaded beside the helper manifest is used. A
 healthy existing host instance is reused. Gryphon keeps its own mode-`0600`
 `/etc/gryphon/gryphon.env`; provision Kernel URL/token so subsequent public and
 adapter addresses are resolved through Kernel.
+
+> Current implementation gap (2026-09-13): the repository workflows still
+> listen to legacy `gryphon-linux-v*` release tags and do not run verification
+> for plain `v*` tags. Those trigger rules are superseded by the contract above.
+> A separate CI change to `gryphon-v*` plus plain-tag verification is required
+> before the next release; legacy tags remain immutable historical records.
 
 Subsequent updates are performed by Updater through
 `/v1/components/gryphon-linux/check` and
