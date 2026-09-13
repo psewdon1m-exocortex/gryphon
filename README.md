@@ -81,7 +81,10 @@ After linking, use `/chronos`, `/chronos status`, `/saturn drop`, or the compact
 
 ## Network boundaries
 
-- `18380`: public webhook listener; publish only behind HTTPS at `GRYPHON_PUBLIC_ORIGIN`.
+- `18380`: public webhook listener; publish only through the single
+  server-managed Nginx at `GRYPHON_PUBLIC_ORIGIN`. Gryphon does not ship or run
+  an embedded Nginx. Telegram webhook traffic is ordinary HTTPS, so coturn is
+  not used.
 - `/run/gryphon/client.sock`: authenticated, service-scoped status, linking and notifications.
 - `/run/gryphon-admin/admin.sock`: local operator CLI and typed Updater operations; service containers
   never mount this socket.
@@ -94,11 +97,17 @@ Persistent state and generated secret copies live under `GRYPHON_DATA_DIR`. Back
 Release tags use `gryphon-linux-vX.Y.Z`. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
 first installation, use Saturn Settings → Bot connection → Install Gryphon.
-Updater obtains and pins `gryphon.pem` from the selected HTTPS release when the
-host has no existing key, verifies the signed archive, provisions the host daemon and connects
-Saturn. A healthy existing host instance is reused. A manual installation may
-run the verified `packaging/linux/install.sh` as root; provision Kernel bootstrap
-URL/token so subsequent public and adapter addresses are resolved through Kernel.
+Gryphon's private signing key remains only in GitHub Secrets; the protected
+release job signs the manifest and publishes the public counterpart. The
+exact-version Updater bootstrap verifies its own signed installer before
+accepting Gryphon's pinned public key from inside that installer. It creates
+`/etc/exocortex/release-trust/gryphon.pem` and fails on an existing mismatching
+key. Updater then verifies Gryphon's manifest before any archive download,
+provisions the host daemon and connects Saturn. No `scp`, manual release-key
+fingerprint or public key downloaded beside the helper manifest is used. A
+healthy existing host instance is reused. Gryphon keeps its own mode-`0600`
+`/etc/gryphon/gryphon.env`; provision Kernel URL/token so subsequent public and
+adapter addresses are resolved through Kernel.
 
 Subsequent updates are performed by Updater through
 `/v1/components/gryphon-linux/check` and
