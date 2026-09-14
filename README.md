@@ -146,8 +146,10 @@ Subsequent updates are performed by Updater through
 `/v1/components/gryphon-linux/check` and
 `/v1/components/gryphon-linux/update`. Updater resolves
 `repositories.gryphon.url` from Kernel Register, verifies the release signature and checksum,
-atomically swaps the app directory, restarts Gryphon, checks the client socket,
-and restores the previous directory if health does not recover.
+atomically swaps the app directory and verified systemd unit, restarts Gryphon,
+checks the client socket, and restores both previous versions if health does
+not recover. The unit preserves `/run/gryphon` across restarts so connected
+service containers retain the live client socket mount.
 
 ## Verify
 

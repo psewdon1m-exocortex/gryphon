@@ -5,9 +5,9 @@ function packageVersion(): string {
   try {
     const packageFile = new URL("../package.json", import.meta.url);
     const value = JSON.parse(fs.readFileSync(packageFile, "utf8")) as { readonly version?: unknown };
-    return typeof value.version === "string" ? value.version : "0.1.2";
+    return typeof value.version === "string" ? value.version : "0.1.3";
   } catch {
-    return "0.1.2";
+    return "0.1.3";
   }
 }
 

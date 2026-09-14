@@ -22,6 +22,7 @@ StateDirectory=gryphon
 StateDirectoryMode=0700
 RuntimeDirectory=gryphon gryphon-admin
 RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=yes
 UMask=0007
 NoNewPrivileges=true
 PrivateTmp=true
