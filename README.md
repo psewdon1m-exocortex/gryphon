@@ -103,7 +103,48 @@ binding and let the service revoke identity-scoped access before it disappears:
 node dist/cli.js link revoke chronos
 ```
 
-After linking, use `/chronos`, `/chronos status`, `/saturn drop`, or the compact forms `/chronos_status` and `/saturn_drop`. `/status` shows binding state for all services connected to that bot.
+Services publish their user-facing commands through the authenticated client
+socket:
+
+```http
+PUT /v1/service/command-catalog
+Authorization: Bearer <service token>
+Content-Type: application/json
+
+{
+  "schema": "exocortex.telegram.command-catalog.v1",
+  "commands": [
+    {
+      "name": "drop",
+      "adapterCommand": "drop",
+      "description": "Create a Drop Point code"
+    }
+  ]
+}
+```
+
+Command names are unique per Telegram bot. Gryphon rejects collisions with
+`409 command_conflict` without replacing the previous catalog. `start`,
+`help`, `services`, `link` and `cancel` are Gryphon commands and cannot be
+claimed by a service. Telegram's native command menu and `/help` are generated
+from this catalog and scoped to the services linked in the current private
+chat.
+
+The primary commands are `/timer`, `/active`, `/today`, `/week`, `/month`,
+`/stop`, `/undo`, `/retype` and `/backfill` for Chronos, plus `/drop`,
+`/drop_status` and `/drop_revoke` for Saturn. Legacy service-prefixed forms
+remain available as hidden compatibility aliases.
+Use `/services` to inspect bindings; `/status` remains a hidden alias for that
+Gryphon command during migration.
+
+Adapters can return `replyKeyboard` on a `send_message` action. Gryphon stores
+each button route against the bot, service connection, Telegram user and
+private chat, then sends Telegram a persistent reply keyboard. Button text is
+never trusted without that scoped mapping and a live service binding. An
+adapter can also return `expectInput` with an adapter command and expiry. The
+next non-command message from that same user and chat is routed to the pending
+command; `/cancel`, unlink, disconnect and expiry clear it. Both interaction
+states survive Gryphon restarts because they are stored in SQLite.
 
 ## Network boundaries
 

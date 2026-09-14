@@ -2,10 +2,18 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { BotRecord, ConnectionRecord } from "./types.js";
+import type { BotRecord, CommandCatalogEntry, ConnectionCommandRecord, ConnectionRecord } from "./types.js";
 
 export class RepositoryCapacityError extends Error {
   constructor() { super("queue_capacity_exceeded"); }
+}
+
+export class CommandConflictError extends Error {
+  constructor(readonly commandName: string) { super("command_conflict"); }
+}
+
+export class ReplyKeyboardConflictError extends Error {
+  constructor(readonly buttonText: string) { super("reply_keyboard_conflict"); }
 }
 
 interface BotRow {
@@ -30,11 +38,29 @@ interface ConnectionRow {
   readonly state: ConnectionRecord["state"];
 }
 
-interface BindingRow {
+export interface BindingRecord {
   readonly connection_id: string;
   readonly telegram_user_id: string;
   readonly telegram_chat_id: string;
   readonly linked_at: string;
+}
+
+interface CommandRow {
+  readonly connection_id: string;
+  readonly bot_id: string;
+  readonly service_id: string;
+  readonly command_name: string;
+  readonly adapter_command: string;
+  readonly description: string;
+}
+
+export interface PendingInputRecord {
+  readonly botId: string;
+  readonly connection: ConnectionRecord;
+  readonly telegramUserId: string;
+  readonly chatId: string;
+  readonly adapterCommand: string;
+  readonly expiresAt: string;
 }
 
 export interface PendingUpdate {
@@ -75,6 +101,17 @@ function connection(row: ConnectionRow): ConnectionRecord {
     adapterUrl: row.adapter_url,
     serviceTokenPath: row.service_token_path,
     state: row.state,
+  };
+}
+
+function command(row: CommandRow): ConnectionCommandRecord {
+  return {
+    connectionId: row.connection_id,
+    botId: row.bot_id,
+    serviceId: row.service_id,
+    name: row.command_name,
+    adapterCommand: row.adapter_command,
+    description: row.description,
   };
 }
 
@@ -121,6 +158,40 @@ export class GryphonRepository {
         telegram_chat_id TEXT NOT NULL,
         linked_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS connection_commands (
+        connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        command_name TEXT NOT NULL,
+        adapter_command TEXT NOT NULL,
+        description TEXT NOT NULL,
+        PRIMARY KEY (connection_id, command_name),
+        UNIQUE (bot_id, command_name)
+      );
+      CREATE INDEX IF NOT EXISTS connection_commands_connection ON connection_commands(connection_id, command_name);
+      CREATE TABLE IF NOT EXISTS reply_keyboard_routes (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+        telegram_user_id TEXT NOT NULL,
+        telegram_chat_id TEXT NOT NULL,
+        button_text TEXT NOT NULL,
+        adapter_command TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        row_index INTEGER NOT NULL,
+        column_index INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, telegram_user_id, telegram_chat_id, button_text)
+      );
+      CREATE INDEX IF NOT EXISTS reply_keyboard_routes_connection ON reply_keyboard_routes(connection_id, telegram_user_id, telegram_chat_id);
+      CREATE TABLE IF NOT EXISTS pending_inputs (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+        telegram_user_id TEXT NOT NULL,
+        telegram_chat_id TEXT NOT NULL,
+        adapter_command TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, telegram_user_id, telegram_chat_id)
+      );
+      CREATE INDEX IF NOT EXISTS pending_inputs_connection ON pending_inputs(connection_id);
       CREATE TABLE IF NOT EXISTS link_challenges (
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
@@ -193,6 +264,8 @@ export class GryphonRepository {
       this.#database.prepare("DELETE FROM delivery_outbox WHERE state='completed' AND completed_at<?").run(cutoff);
       this.#database.prepare("DELETE FROM callbacks WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
       this.#database.prepare("DELETE FROM link_challenges WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
+      this.#database.prepare("DELETE FROM reply_keyboard_routes WHERE expires_at<=?").run(now.toISOString());
+      this.#database.prepare("DELETE FROM pending_inputs WHERE expires_at<=?").run(now.toISOString());
       this.#database.exec("UPDATE telegram_updates SET body_json='{}' WHERE state='completed' AND body_json<>'{}'; UPDATE delivery_outbox SET payload_json='{}' WHERE state='completed' AND payload_json<>'{}';");
     });
     this.#database.exec("PRAGMA wal_checkpoint(PASSIVE);");
@@ -275,6 +348,49 @@ export class GryphonRepository {
     return (this.#database.prepare("SELECT * FROM connections WHERE bot_id=? AND state='enabled' ORDER BY service_id").all(botId) as unknown as ConnectionRow[]).map(connection);
   }
 
+  getConnectionCommand(botId: string, commandName: string): ConnectionCommandRecord | undefined {
+    const row = this.#database.prepare(`SELECT cc.connection_id,cc.bot_id,c.service_id,cc.command_name,cc.adapter_command,cc.description
+      FROM connection_commands cc JOIN connections c ON c.id=cc.connection_id
+      WHERE cc.bot_id=? AND cc.command_name=? AND c.state='enabled'`).get(botId, commandName) as unknown as CommandRow | undefined;
+    return row === undefined ? undefined : command(row);
+  }
+
+  listConnectionCommands(connectionId: string): readonly ConnectionCommandRecord[] {
+    return (this.#database.prepare(`SELECT cc.connection_id,cc.bot_id,c.service_id,cc.command_name,cc.adapter_command,cc.description
+      FROM connection_commands cc JOIN connections c ON c.id=cc.connection_id
+      WHERE cc.connection_id=? ORDER BY cc.command_name`).all(connectionId) as unknown as CommandRow[]).map(command);
+  }
+
+  listCommandsForActor(botId: string, telegramUserId: string, chatId: string): readonly ConnectionCommandRecord[] {
+    return (this.#database.prepare(`SELECT cc.connection_id,cc.bot_id,c.service_id,cc.command_name,cc.adapter_command,cc.description
+      FROM connection_commands cc
+      JOIN connections c ON c.id=cc.connection_id AND c.state='enabled'
+      JOIN telegram_bindings tb ON tb.connection_id=c.id
+      WHERE cc.bot_id=? AND tb.telegram_user_id=? AND tb.telegram_chat_id=?
+      ORDER BY cc.command_name`).all(botId, telegramUserId, chatId) as unknown as CommandRow[]).map(command);
+  }
+
+  countCommandsForBotExcluding(botId: string, connectionId: string): number {
+    const row = this.#database.prepare("SELECT count(*) AS total FROM connection_commands WHERE bot_id=? AND connection_id<>?")
+      .get(botId, connectionId) as unknown as { readonly total: number };
+    return row.total;
+  }
+
+  replaceConnectionCommands(connectionId: string, botId: string, entries: readonly CommandCatalogEntry[]): readonly ConnectionCommandRecord[] {
+    return this.transaction(() => {
+      for (const entry of entries) {
+        const conflict = this.#database.prepare("SELECT connection_id FROM connection_commands WHERE bot_id=? AND command_name=? AND connection_id<>?")
+          .get(botId, entry.name, connectionId) as unknown as { readonly connection_id: string } | undefined;
+        if (conflict !== undefined) throw new CommandConflictError(entry.name);
+      }
+      this.#database.prepare("DELETE FROM connection_commands WHERE connection_id=?").run(connectionId);
+      const insert = this.#database.prepare(`INSERT INTO connection_commands
+        (connection_id,bot_id,command_name,adapter_command,description) VALUES (?,?,?,?,?)`);
+      for (const entry of entries) insert.run(connectionId, botId, entry.name, entry.adapterCommand, entry.description);
+      return this.listConnectionCommands(connectionId);
+    });
+  }
+
   createConnection(input: Omit<ConnectionRecord, "id" | "state">, now: Date): ConnectionRecord {
     const id = randomUUID();
     const timestamp = now.toISOString();
@@ -291,8 +407,14 @@ export class GryphonRepository {
     return Number(this.#database.prepare("DELETE FROM connections WHERE service_id=?").run(serviceId).changes) > 0;
   }
 
-  getBinding(connectionId: string): BindingRow | undefined {
-    return this.#database.prepare("SELECT * FROM telegram_bindings WHERE connection_id=?").get(connectionId) as unknown as BindingRow | undefined;
+  getBinding(connectionId: string): BindingRecord | undefined {
+    return this.#database.prepare("SELECT * FROM telegram_bindings WHERE connection_id=?").get(connectionId) as unknown as BindingRecord | undefined;
+  }
+
+  listBindingsForBot(botId: string): readonly BindingRecord[] {
+    return this.#database.prepare(`SELECT DISTINCT tb.connection_id,tb.telegram_user_id,tb.telegram_chat_id,tb.linked_at
+      FROM telegram_bindings tb JOIN connections c ON c.id=tb.connection_id
+      WHERE c.bot_id=? AND c.state='enabled' ORDER BY tb.telegram_chat_id,tb.telegram_user_id`).all(botId) as unknown as BindingRecord[];
   }
 
   createChallenge(connectionId: string, digest: string, now: Date, expiresAt: Date): void {
@@ -319,9 +441,118 @@ export class GryphonRepository {
 
   revokeBinding(connectionId: string): boolean {
     return this.transaction(() => {
+      const binding = this.getBinding(connectionId);
       this.#database.prepare("DELETE FROM link_challenges WHERE connection_id=? AND consumed_at IS NULL").run(connectionId);
+      if (binding !== undefined) {
+        this.#database.prepare("DELETE FROM pending_inputs WHERE connection_id=? AND telegram_user_id=? AND telegram_chat_id=?")
+          .run(connectionId, binding.telegram_user_id, binding.telegram_chat_id);
+        this.#database.prepare("DELETE FROM reply_keyboard_routes WHERE connection_id=? AND telegram_user_id=? AND telegram_chat_id=?")
+          .run(connectionId, binding.telegram_user_id, binding.telegram_chat_id);
+      }
       return Number(this.#database.prepare("DELETE FROM telegram_bindings WHERE connection_id=?").run(connectionId).changes) > 0;
     });
+  }
+
+  replaceReplyKeyboardRoutes(input: {
+    readonly botId: string;
+    readonly connectionId: string;
+    readonly telegramUserId: string;
+    readonly chatId: string;
+    readonly rows: readonly (readonly { readonly text: string; readonly command: string; readonly arguments: Readonly<Record<string, unknown>> }[])[];
+    readonly expiresAt: Date;
+  }): void {
+    this.transaction(() => {
+      for (const row of input.rows) {
+        for (const button of row) {
+          const conflict = this.#database.prepare(`SELECT connection_id FROM reply_keyboard_routes
+            WHERE bot_id=? AND telegram_user_id=? AND telegram_chat_id=? AND button_text=? AND connection_id<>?`)
+            .get(input.botId, input.telegramUserId, input.chatId, button.text, input.connectionId) as unknown as { readonly connection_id: string } | undefined;
+          if (conflict !== undefined) throw new ReplyKeyboardConflictError(button.text);
+        }
+      }
+      this.#database.prepare("DELETE FROM reply_keyboard_routes WHERE connection_id=? AND telegram_user_id=? AND telegram_chat_id=?")
+        .run(input.connectionId, input.telegramUserId, input.chatId);
+      const insert = this.#database.prepare(`INSERT INTO reply_keyboard_routes
+        (bot_id,connection_id,telegram_user_id,telegram_chat_id,button_text,adapter_command,arguments_json,row_index,column_index,expires_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`);
+      input.rows.forEach((row, rowIndex) => row.forEach((button, columnIndex) => {
+        insert.run(input.botId, input.connectionId, input.telegramUserId, input.chatId, button.text, button.command,
+          JSON.stringify(button.arguments), rowIndex, columnIndex, input.expiresAt.toISOString());
+      }));
+    });
+  }
+
+  hasReplyKeyboardRoutes(connectionId: string, telegramUserId: string, chatId: string, now: Date): boolean {
+    return this.#database.prepare(`SELECT 1 FROM reply_keyboard_routes
+      WHERE connection_id=? AND telegram_user_id=? AND telegram_chat_id=? AND expires_at>? LIMIT 1`)
+      .get(connectionId, telegramUserId, chatId, now.toISOString()) !== undefined;
+  }
+
+  getReplyKeyboardRoute(input: { readonly botId: string; readonly telegramUserId: string; readonly chatId: string; readonly buttonText: string; readonly now: Date }): {
+    readonly connection: ConnectionRecord;
+    readonly command: string;
+    readonly arguments: Readonly<Record<string, unknown>>;
+  } | undefined {
+    const row = this.#database.prepare(`SELECT r.connection_id,r.adapter_command,r.arguments_json
+      FROM reply_keyboard_routes r JOIN connections c ON c.id=r.connection_id
+      WHERE r.bot_id=? AND r.telegram_user_id=? AND r.telegram_chat_id=? AND r.button_text=? AND r.expires_at>? AND c.state='enabled'`)
+      .get(input.botId, input.telegramUserId, input.chatId, input.buttonText, input.now.toISOString()) as unknown as {
+        readonly connection_id: string;
+        readonly adapter_command: string;
+        readonly arguments_json: string;
+      } | undefined;
+    if (row === undefined) return undefined;
+    const target = this.getConnectionById(row.connection_id);
+    if (target === undefined) return undefined;
+    return { connection: target, command: row.adapter_command, arguments: JSON.parse(row.arguments_json) as Readonly<Record<string, unknown>> };
+  }
+
+  setPendingInput(input: {
+    readonly botId: string;
+    readonly connectionId: string;
+    readonly telegramUserId: string;
+    readonly chatId: string;
+    readonly adapterCommand: string;
+    readonly expiresAt: Date;
+  }): void {
+    this.#database.prepare(`INSERT INTO pending_inputs
+      (bot_id,connection_id,telegram_user_id,telegram_chat_id,adapter_command,expires_at) VALUES (?,?,?,?,?,?)
+      ON CONFLICT(bot_id,telegram_user_id,telegram_chat_id) DO UPDATE SET
+        connection_id=excluded.connection_id,adapter_command=excluded.adapter_command,expires_at=excluded.expires_at`)
+      .run(input.botId, input.connectionId, input.telegramUserId, input.chatId, input.adapterCommand, input.expiresAt.toISOString());
+  }
+
+  getPendingInput(input: { readonly botId: string; readonly telegramUserId: string; readonly chatId: string; readonly now: Date }): PendingInputRecord | undefined {
+    const row = this.#database.prepare(`SELECT p.bot_id,p.connection_id,p.telegram_user_id,p.telegram_chat_id,p.adapter_command,p.expires_at
+      FROM pending_inputs p JOIN connections c ON c.id=p.connection_id
+      WHERE p.bot_id=? AND p.telegram_user_id=? AND p.telegram_chat_id=? AND p.expires_at>? AND c.state='enabled'`)
+      .get(input.botId, input.telegramUserId, input.chatId, input.now.toISOString()) as unknown as {
+        readonly bot_id: string;
+        readonly connection_id: string;
+        readonly telegram_user_id: string;
+        readonly telegram_chat_id: string;
+        readonly adapter_command: string;
+        readonly expires_at: string;
+      } | undefined;
+    if (row === undefined) {
+      this.clearPendingInput(input.botId, input.telegramUserId, input.chatId);
+      return undefined;
+    }
+    const target = this.getConnectionById(row.connection_id);
+    if (target === undefined) return undefined;
+    return {
+      botId: row.bot_id,
+      connection: target,
+      telegramUserId: row.telegram_user_id,
+      chatId: row.telegram_chat_id,
+      adapterCommand: row.adapter_command,
+      expiresAt: row.expires_at,
+    };
+  }
+
+  clearPendingInput(botId: string, telegramUserId: string, chatId: string): boolean {
+    return Number(this.#database.prepare("DELETE FROM pending_inputs WHERE bot_id=? AND telegram_user_id=? AND telegram_chat_id=?")
+      .run(botId, telegramUserId, chatId).changes) > 0;
   }
 
   acceptUpdate(botId: string, updateId: string, body: unknown, now: Date): boolean {

@@ -52,6 +52,7 @@ describe("Gryphon HTTP boundaries", () => {
     const transport: TelegramTransport = {
       getMe: () => Promise.resolve({ id: "10001", isBot: true, username: "test_bot" }),
       setWebhook: (input) => { webhook = input; return Promise.resolve(); },
+      setCommands: () => Promise.resolve(),
       sendMessage: (input) => { sent.push(input.text); return Promise.resolve(); },
       answerCallbackQuery: () => Promise.resolve(),
     };
@@ -102,6 +103,20 @@ describe("Gryphon HTTP boundaries", () => {
         body: JSON.stringify({ botId: availableBody.bots[0]!.id, commandPrefix: "chronos", adapterUrl: "http://chronos.test/api/internal/gryphon/command" }),
       });
       expect(serviceConnection.status).toBe(201);
+      const catalog = await fetch(`${clientOrigin}/v1/service/command-catalog`, {
+        method: "PUT",
+        headers: { "Authorization": `Bearer ${serviceToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schema: "exocortex.telegram.command-catalog.v1",
+          commands: [{ name: "timer", adapterCommand: "menu", description: "Open activity controls" }],
+        }),
+      });
+      expect(catalog.status).toBe(200);
+      expect(await catalog.json()).toMatchObject({
+        schema: "exocortex.telegram.command-catalog.v1",
+        serviceId: "chronos",
+        commands: [{ name: "timer", adapterCommand: "menu", description: "Open activity controls" }],
+      });
 
       const challengeResponse = await fetch(`${clientOrigin}/v1/service/link-challenges`, { method: "POST", headers: { "Authorization": `Bearer ${serviceToken}` } });
       const challenge = await challengeResponse.json() as { readonly command: string };

@@ -63,6 +63,15 @@ export class TelegramHttpTransport implements TelegramTransport {
     });
   }
 
+  async setCommands(input: { readonly chatId?: string; readonly commands: readonly { readonly command: string; readonly description: string }[] }): Promise<void> {
+    await this.#request<boolean>("setMyCommands", {
+      commands: input.commands,
+      scope: input.chatId === undefined
+        ? { type: "default" }
+        : { type: "chat", chat_id: input.chatId },
+    });
+  }
+
   async sendMessage(input: { readonly chatId: string; readonly text: string; readonly replyMarkup?: Readonly<Record<string, unknown>> }): Promise<void> {
     await this.#request<Record<string, unknown>>("sendMessage", {
       chat_id: input.chatId,

@@ -68,15 +68,34 @@ export function createClientServer(gateway: GryphonGateway): http.Server {
         for (const field of ["botId", "commandPrefix", "adapterUrl"] as const) {
           if (typeof value[field] !== "string") throw new GryphonError("invalid_connection");
         }
-        return send(response, 201, gateway.connectService(authorization, {
+        const result = gateway.connectService(authorization, {
           botId: value.botId as string,
           commandPrefix: value.commandPrefix as string,
           adapterUrl: value.adapterUrl as string,
-        }));
+        });
+        send(response, 201, result);
+        void gateway.drain();
+        return;
       }
-      if (request.method === "DELETE" && url.pathname === "/v1/service/connection") return send(response, 200, gateway.disconnectService(authorization));
+      if (request.method === "DELETE" && url.pathname === "/v1/service/connection") {
+        const result = gateway.disconnectService(authorization);
+        send(response, 200, result);
+        void gateway.drain();
+        return;
+      }
+      if (request.method === "PUT" && url.pathname === "/v1/service/command-catalog") {
+        const result = gateway.syncServiceCommandCatalog(authorization, await jsonBody(request, 65_536));
+        send(response, 200, result);
+        void gateway.drain();
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/service/link-challenges") return send(response, 201, gateway.issueServiceLink(authorization));
-      if (request.method === "DELETE" && url.pathname === "/v1/service/binding") return send(response, 200, await gateway.revokeServiceLink(authorization));
+      if (request.method === "DELETE" && url.pathname === "/v1/service/binding") {
+        const result = await gateway.revokeServiceLink(authorization);
+        send(response, 200, result);
+        void gateway.drain();
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/v1/service/notifications") {
         const body = await jsonBody(request, 16_384);
         if (typeof body !== "object" || body === null) throw new GryphonError("invalid_notification");
@@ -122,7 +141,12 @@ export function createAdminServer(gateway: GryphonGateway): http.Server {
       }
       const issue = /^\/v1\/links\/([a-z][a-z0-9-]{1,47})$/.exec(url.pathname);
       if (request.method === "POST" && issue?.[1] !== undefined) return send(response, 201, gateway.issueLink(issue[1]));
-      if (request.method === "DELETE" && issue?.[1] !== undefined) return send(response, 200, await gateway.revokeLink(issue[1]));
+      if (request.method === "DELETE" && issue?.[1] !== undefined) {
+        const result = await gateway.revokeLink(issue[1]);
+        send(response, 200, result);
+        void gateway.drain();
+        return;
+      }
       send(response, 404, { error: "not_found" });
     } catch (error) { fail(response, error); }
   });

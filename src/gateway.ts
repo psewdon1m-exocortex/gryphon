@@ -2,24 +2,36 @@ import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from
 import fs from "node:fs";
 import path from "node:path";
 import type { GryphonConfig } from "./config.js";
-import { GryphonRepository } from "./repository.js";
+import { CommandConflictError, GryphonRepository, ReplyKeyboardConflictError } from "./repository.js";
 import { TelegramHttpTransport } from "./telegram.js";
 import { registeredOrigin } from "./kernel.js";
 import { nativeFetch } from "./http-transport.js";
 import type {
   AdapterDispatcher,
   BotRecord,
+  CommandCatalogEntry,
   CommandEnvelope,
   CommandResponse,
   ConnectionRecord,
   ResponseAction,
   TelegramActor,
+  TelegramCommand,
   TransportFactory,
 } from "./types.js";
 
 const LINK_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SERVICE_ID = /^[a-z][a-z0-9-]{1,47}$/;
 const COMMAND_PREFIX = /^[a-z][a-z0-9_]{1,31}$/;
+const COMMAND_NAME = /^[a-z][a-z0-9_]{0,31}$/;
+const SYSTEM_COMMANDS = [
+  { command: "start", description: "Open the Gryphon menu" },
+  { command: "help", description: "Show available commands" },
+  { command: "services", description: "Show linked services" },
+  { command: "link", description: "Link a service with a code" },
+  { command: "cancel", description: "Cancel pending input" },
+] as const satisfies readonly TelegramCommand[];
+const RESERVED_COMMANDS = new Set([...SYSTEM_COMMANDS.map((item) => item.command), "status"]);
+const MAX_TELEGRAM_COMMANDS = 100;
 
 export class GryphonError extends Error {
   constructor(readonly code: string, readonly status = 400) { super(code); }
@@ -54,33 +66,72 @@ function writeSecret(filename: string, value: string): void {
   try { fs.chmodSync(filename, 0o600); } catch { /* Windows has no POSIX mode enforcement. */ }
 }
 
+function responseButton(value: unknown): { readonly text: string; readonly command: string; readonly arguments?: Readonly<Record<string, unknown>> } {
+  if (typeof value !== "object" || value === null) throw new GryphonError("invalid_adapter_response", 502);
+  const item = value as Record<string, unknown>;
+  if (typeof item.text !== "string" || item.text.length < 1 || item.text.length > 64 || typeof item.command !== "string" || !COMMAND_NAME.test(item.command)) {
+    throw new GryphonError("invalid_adapter_response", 502);
+  }
+  if (item.arguments !== undefined && (typeof item.arguments !== "object" || item.arguments === null || Array.isArray(item.arguments))) {
+    throw new GryphonError("invalid_adapter_response", 502);
+  }
+  return {
+    text: item.text,
+    command: item.command,
+    ...(item.arguments === undefined ? {} : { arguments: item.arguments as Readonly<Record<string, unknown>> }),
+  };
+}
+
+function buttonRows(value: unknown): readonly (readonly ReturnType<typeof responseButton>[])[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8) throw new GryphonError("invalid_adapter_response", 502);
+  return value.map((row) => {
+    if (!Array.isArray(row) || row.length < 1 || row.length > 8) throw new GryphonError("invalid_adapter_response", 502);
+    return row.map(responseButton);
+  });
+}
+
 function action(value: unknown): ResponseAction {
   if (typeof value !== "object" || value === null) throw new GryphonError("invalid_adapter_response", 502);
   const candidate = value as Record<string, unknown>;
   if (candidate.type !== "send_message" || typeof candidate.text !== "string" || candidate.text.length < 1 || candidate.text.length > 4_096) {
     throw new GryphonError("invalid_adapter_response", 502);
   }
-  if (candidate.buttons === undefined) return { type: "send_message", text: candidate.text };
-  if (!Array.isArray(candidate.buttons) || candidate.buttons.length > 8) throw new GryphonError("invalid_adapter_response", 502);
-  const buttons = candidate.buttons.map((row) => {
-    if (!Array.isArray(row) || row.length < 1 || row.length > 8) throw new GryphonError("invalid_adapter_response", 502);
-    return row.map((button) => {
-      if (typeof button !== "object" || button === null) throw new GryphonError("invalid_adapter_response", 502);
-      const item = button as Record<string, unknown>;
-      if (typeof item.text !== "string" || item.text.length < 1 || item.text.length > 64 || typeof item.command !== "string" || !COMMAND_PREFIX.test(item.command)) {
-        throw new GryphonError("invalid_adapter_response", 502);
-      }
-      if (item.arguments !== undefined && (typeof item.arguments !== "object" || item.arguments === null || Array.isArray(item.arguments))) {
-        throw new GryphonError("invalid_adapter_response", 502);
-      }
-      return {
-        text: item.text,
-        command: item.command,
-        ...(item.arguments === undefined ? {} : { arguments: item.arguments as Readonly<Record<string, unknown>> }),
-      };
-    });
-  });
-  return { type: "send_message", text: candidate.text, buttons };
+  if (candidate.buttons !== undefined && candidate.replyKeyboard !== undefined) throw new GryphonError("invalid_adapter_response", 502);
+  const buttons = candidate.buttons === undefined ? undefined : buttonRows(candidate.buttons);
+  let replyKeyboard: ResponseAction["replyKeyboard"];
+  if (candidate.replyKeyboard !== undefined) {
+    const keyboard = record(candidate.replyKeyboard);
+    if (keyboard === undefined || keyboard.persistent !== true || typeof keyboard.resize !== "boolean") throw new GryphonError("invalid_adapter_response", 502);
+    if (keyboard.placeholder !== undefined && (typeof keyboard.placeholder !== "string" || keyboard.placeholder.length < 1 || keyboard.placeholder.length > 64)) {
+      throw new GryphonError("invalid_adapter_response", 502);
+    }
+    const rows = buttonRows(keyboard.rows);
+    const labels = rows.flat().map((item) => item.text);
+    if (new Set(labels).size !== labels.length) throw new GryphonError("invalid_adapter_response", 502);
+    replyKeyboard = {
+      persistent: true,
+      resize: keyboard.resize,
+      ...(typeof keyboard.placeholder === "string" ? { placeholder: keyboard.placeholder } : {}),
+      rows,
+    };
+  }
+  let expectInput: ResponseAction["expectInput"];
+  if (candidate.expectInput !== undefined) {
+    const expected = record(candidate.expectInput);
+    if (expected === undefined || typeof expected.command !== "string" || !COMMAND_NAME.test(expected.command)
+      || typeof expected.expiresInSeconds !== "number" || !Number.isInteger(expected.expiresInSeconds)
+      || expected.expiresInSeconds < 1 || expected.expiresInSeconds > 3_600) {
+      throw new GryphonError("invalid_adapter_response", 502);
+    }
+    expectInput = { command: expected.command, expiresInSeconds: expected.expiresInSeconds };
+  }
+  return {
+    type: "send_message",
+    text: candidate.text,
+    ...(buttons === undefined ? {} : { buttons }),
+    ...(replyKeyboard === undefined ? {} : { replyKeyboard }),
+    ...(expectInput === undefined ? {} : { expectInput }),
+  };
 }
 
 function response(value: unknown): CommandResponse {
@@ -90,6 +141,18 @@ function response(value: unknown): CommandResponse {
     throw new GryphonError("invalid_adapter_response", 502);
   }
   return { schema: candidate.schema, actions: candidate.actions.map(action) };
+}
+
+function telegramCommands(value: unknown): readonly TelegramCommand[] {
+  if (!Array.isArray(value) || value.length > MAX_TELEGRAM_COMMANDS) throw new GryphonError("invalid_delivery");
+  return value.map((raw) => {
+    const item = record(raw);
+    if (item === undefined || typeof item.command !== "string" || !COMMAND_NAME.test(item.command)
+      || typeof item.description !== "string" || item.description.length < 1 || item.description.length > 256) {
+      throw new GryphonError("invalid_delivery");
+    }
+    return { command: item.command, description: item.description };
+  });
 }
 
 const defaultDispatcher: AdapterDispatcher = async (connection, token, envelope) => {
@@ -186,6 +249,7 @@ export class GryphonGateway {
   readonly #transportFactory: TransportFactory;
   readonly #adapterDispatcher: AdapterDispatcher;
   readonly #registeredOrigins = new Map<string, string>();
+  readonly #initializedBots = new Set<string>();
   #draining = false;
 
   constructor(input: {
@@ -262,6 +326,10 @@ export class GryphonGateway {
         });
         this.#registeredOrigins.set(current.id, origin);
       }
+      if (!this.#initializedBots.has(current.id)) {
+        await this.#setBotCommandMenus(transport, current.id);
+        this.#initializedBots.add(current.id);
+      }
       this.#repository.setBotState(current.id, "ready", new Date());
     } catch (error) {
       this.#repository.setBotState(current.id, "degraded", new Date());
@@ -291,6 +359,55 @@ export class GryphonGateway {
       version: this.#config.version,
       bots: this.#repository.listBots().map((current) => ({ id: current.id, alias: current.alias, telegramBotId: current.telegramBotId, username: current.username, state: current.state })),
     };
+  }
+
+  #commandsForActor(botId: string, telegramUserId: string, chatId: string): readonly TelegramCommand[] {
+    return [
+      ...SYSTEM_COMMANDS,
+      ...this.#repository.listCommandsForActor(botId, telegramUserId, chatId).map((item) => ({
+        command: item.name,
+        description: item.description,
+      })),
+    ];
+  }
+
+  #boundActors(botId: string): readonly { readonly telegramUserId: string; readonly chatId: string }[] {
+    const actors = new Map<string, { readonly telegramUserId: string; readonly chatId: string }>();
+    for (const binding of this.#repository.listBindingsForBot(botId)) {
+      const key = `${binding.telegram_user_id}\u0000${binding.telegram_chat_id}`;
+      actors.set(key, { telegramUserId: binding.telegram_user_id, chatId: binding.telegram_chat_id });
+    }
+    return [...actors.values()];
+  }
+
+  async #setBotCommandMenus(transport: ReturnType<TransportFactory>, botId: string): Promise<void> {
+    await transport.setCommands({ commands: SYSTEM_COMMANDS });
+    for (const actor of this.#boundActors(botId)) {
+      const commands = this.#commandsForActor(botId, actor.telegramUserId, actor.chatId);
+      try {
+        await transport.setCommands({ chatId: actor.chatId, commands });
+      } catch {
+        try { this.#queueCommandMenu(botId, commands, actor.chatId); } catch { /* A later catalog or binding sync will retry. */ }
+      }
+    }
+  }
+
+  #queueCommandMenu(botId: string, commands: readonly TelegramCommand[], chatId?: string): void {
+    this.#repository.enqueueDelivery({
+      id: randomUUID(),
+      botId,
+      chatId: chatId ?? "",
+      payload: { method: "setMyCommands", commands },
+      idempotencyKey: `${botId}:commands:${chatId ?? "default"}:${randomUUID()}`,
+      now: new Date(),
+    });
+  }
+
+  #queueBotCommandMenus(botId: string): void {
+    this.#queueCommandMenu(botId, SYSTEM_COMMANDS);
+    for (const actor of this.#boundActors(botId)) {
+      this.#queueCommandMenu(botId, this.#commandsForActor(botId, actor.telegramUserId, actor.chatId), actor.chatId);
+    }
   }
 
   #serviceCredentials(): readonly ServiceCredential[] {
@@ -378,12 +495,66 @@ export class GryphonGateway {
     } catch {
       throw new GryphonError("connection_conflict", 409);
     }
+    this.#queueBotCommandMenus(bot.id);
     return this.serviceStatus(authorization);
   }
 
   disconnectService(authorization: string): { readonly disconnected: boolean } {
     const target = this.authenticateService(authorization);
-    return { disconnected: this.#repository.deleteConnection(target.serviceId) };
+    const connection = target.connection;
+    if (connection === undefined) return { disconnected: false };
+    const binding = this.#repository.getBinding(connection.id);
+    const removeKeyboard = binding !== undefined && this.#repository.hasReplyKeyboardRoutes(
+      connection.id, binding.telegram_user_id, binding.telegram_chat_id, new Date(),
+    );
+    const disconnected = this.#repository.deleteConnection(target.serviceId);
+    if (disconnected && binding !== undefined && removeKeyboard) {
+      this.#queueMessage(connection.botId, binding.telegram_chat_id, `${connection.serviceId} disconnected.`,
+        `${connection.id}:disconnect:${randomUUID()}`, { remove_keyboard: true });
+    }
+    if (disconnected) this.#queueBotCommandMenus(connection.botId);
+    return { disconnected };
+  }
+
+  syncServiceCommandCatalog(authorization: string, value: unknown): Readonly<Record<string, unknown>> {
+    const target = this.authenticateService(authorization);
+    const connection = target.connection;
+    if (connection === undefined) throw new GryphonError("connection_not_found", 404);
+    const catalog = record(value);
+    if (catalog?.schema !== "exocortex.telegram.command-catalog.v1" || !Array.isArray(catalog.commands)) {
+      throw new GryphonError("invalid_command_catalog");
+    }
+    const commands: CommandCatalogEntry[] = [];
+    const names = new Set<string>();
+    for (const raw of catalog.commands) {
+      const item = record(raw);
+      const description = typeof item?.description === "string" ? item.description.trim().replace(/\s+/g, " ") : "";
+      if (item === undefined || typeof item.name !== "string" || !COMMAND_NAME.test(item.name)
+        || typeof item.adapterCommand !== "string" || !COMMAND_NAME.test(item.adapterCommand)
+        || description.length < 1 || description.length > 256) {
+        throw new GryphonError("invalid_command_catalog");
+      }
+      if (RESERVED_COMMANDS.has(item.name)) throw new GryphonError("command_conflict", 409);
+      if (names.has(item.name)) throw new GryphonError("command_conflict", 409);
+      names.add(item.name);
+      commands.push({ name: item.name, adapterCommand: item.adapterCommand, description });
+    }
+    if (this.#repository.countCommandsForBotExcluding(connection.botId, connection.id) + commands.length + SYSTEM_COMMANDS.length > MAX_TELEGRAM_COMMANDS) {
+      throw new GryphonError("command_limit_exceeded", 409);
+    }
+    let stored;
+    try {
+      stored = this.#repository.replaceConnectionCommands(connection.id, connection.botId, commands);
+    } catch (error) {
+      if (error instanceof CommandConflictError) throw new GryphonError("command_conflict", 409);
+      throw error;
+    }
+    this.#queueBotCommandMenus(connection.botId);
+    return {
+      schema: "exocortex.telegram.command-catalog.v1",
+      serviceId: connection.serviceId,
+      commands: stored.map((item) => ({ name: item.name, adapterCommand: item.adapterCommand, description: item.description })),
+    };
   }
 
   serviceStatus(authorization: string): Readonly<Record<string, unknown>> {
@@ -399,6 +570,11 @@ export class GryphonGateway {
       state: connection?.state ?? "unlinked",
       connected: connection !== undefined,
       commandPrefix: connection?.commandPrefix ?? null,
+      commands: connection === undefined ? [] : this.#repository.listConnectionCommands(connection.id).map((item) => ({
+        name: item.name,
+        adapterCommand: item.adapterCommand,
+        description: item.description,
+      })),
       bot: current === undefined ? null : {
         id: current.id,
         alias: current.alias,
@@ -437,6 +613,9 @@ export class GryphonGateway {
     if (target === undefined) throw new GryphonError("connection_not_found", 404);
     const binding = this.#repository.getBinding(target.id);
     if (binding === undefined) return { revoked: false };
+    const removeKeyboard = this.#repository.hasReplyKeyboardRoutes(
+      target.id, binding.telegram_user_id, binding.telegram_chat_id, new Date(),
+    );
     await this.#adapterDispatcher(target, readSecret(target.serviceTokenPath), {
       schema: "exocortex.telegram.command.v1",
       eventId: `binding-revoked:${target.id}:${randomUUID()}`,
@@ -451,7 +630,13 @@ export class GryphonGateway {
       command: "binding_revoked",
       arguments: {},
     });
-    return { revoked: this.#repository.revokeBinding(target.id) };
+    const revoked = this.#repository.revokeBinding(target.id);
+    if (revoked && removeKeyboard) {
+      this.#queueMessage(target.botId, binding.telegram_chat_id, `${target.serviceId} unlinked.`,
+        `${target.id}:unlink:${randomUUID()}`, { remove_keyboard: true });
+    }
+    if (revoked) this.#queueBotCommandMenus(target.botId);
+    return { revoked };
   }
 
   #linkDigest(telegramBotId: string, code: string): string {
@@ -506,6 +691,11 @@ export class GryphonGateway {
               ...(typeof delivery.payload.text === "string" ? { text: delivery.payload.text } : {}),
               ...(typeof delivery.payload.showAlert === "boolean" ? { showAlert: delivery.payload.showAlert } : {}),
             });
+          } else if (method === "setMyCommands") {
+            await transport.setCommands({
+              ...(delivery.chatId ? { chatId: delivery.chatId } : {}),
+              commands: telegramCommands(delivery.payload.commands),
+            });
           } else {
             throw new GryphonError("invalid_delivery");
           }
@@ -555,10 +745,37 @@ export class GryphonGateway {
     this.#queueCallback(botId, callback.chatId, callback.id, "Done", false, `${botId}:${updateId}:callback-ok`);
   }
 
+  #queueHelp(botId: string, updateId: string, actor: TelegramActor, start: boolean): void {
+    const heading = start ? "Gryphon is ready.\n\nAvailable commands:" : "Available commands:";
+    const lines = this.#commandsForActor(botId, actor.telegramUserId, actor.chatId)
+      .map((item) => `/${item.command} — ${item.description}`);
+    const chunks: string[] = [];
+    let current = heading;
+    for (const line of lines) {
+      if (`${current}\n${line}`.length > 4_096) {
+        chunks.push(current);
+        current = line;
+      } else {
+        current += `\n${line}`;
+      }
+    }
+    chunks.push(current);
+    chunks.forEach((chunk, index) => this.#queueMessage(botId, actor.chatId, chunk, `${botId}:${updateId}:help:${String(index)}`));
+  }
+
   async #processMessage(botId: string, updateId: string, actor: TelegramActor, text: string): Promise<void> {
     const trimmed = text.trim();
     const [head = "", ...tail] = trimmed.split(/\s+/);
     const normalizedHead = head.toLowerCase().split("@")[0]!;
+    const slashCommand = normalizedHead.startsWith("/");
+    const cancelledPending = slashCommand
+      ? this.#repository.clearPendingInput(botId, actor.telegramUserId, actor.chatId)
+      : false;
+
+    if (normalizedHead === "/cancel") {
+      this.#queueMessage(botId, actor.chatId, cancelledPending ? "Pending input cancelled." : "There is no pending input.", `${botId}:${updateId}:cancel`);
+      return;
+    }
     if (normalizedHead === "/link") {
       const code = (tail[0] ?? "").toUpperCase();
       const current = this.#repository.getBotById(botId)!;
@@ -566,28 +783,68 @@ export class GryphonGateway {
         ? this.#repository.consumeChallenge({ botId, digest: this.#linkDigest(current.telegramBotId, code), telegramUserId: actor.telegramUserId, chatId: actor.chatId, now: new Date() })
         : undefined;
       this.#queueMessage(botId, actor.chatId, target === undefined ? "The link code is invalid or has expired." : `${target.serviceId} linked to this Telegram account.`, `${botId}:${updateId}:link`);
+      if (target !== undefined) {
+        this.#queueCommandMenu(botId, this.#commandsForActor(botId, actor.telegramUserId, actor.chatId), actor.chatId);
+        const initialCommand = this.#repository.listConnectionCommands(target.id).some((item) => item.adapterCommand === "menu") ? "menu" : "start";
+        try { await this.#dispatch(botId, updateId, target, actor, initialCommand, {}); } catch { /* Linking remains valid while a service restarts. */ }
+      }
       return;
     }
     if (normalizedHead === "/start" || normalizedHead === "/help") {
-      const connections = this.#repository.listConnectionsForBot(botId);
-      const commands = connections.map((item) => `/${item.commandPrefix}`).join(", ");
-      this.#queueMessage(botId, actor.chatId, commands ? `Gryphon is ready. Services: ${commands}. Use /link CODE to authorize a service.` : "Gryphon is ready. No services are connected.", `${botId}:${updateId}:help`);
+      this.#queueHelp(botId, updateId, actor, normalizedHead === "/start");
       return;
     }
-    if (normalizedHead === "/status") {
+    if (normalizedHead === "/services" || normalizedHead === "/status") {
       const lines = this.#repository.listConnectionsForBot(botId).map((item) => {
         const binding = this.#repository.getBinding(item.id);
         const linked = binding?.telegram_user_id === actor.telegramUserId && binding.telegram_chat_id === actor.chatId;
         return `${item.serviceId}: ${linked ? "linked" : "not linked"}`;
       });
-      this.#queueMessage(botId, actor.chatId, lines.length ? lines.join("\n") : "No services are connected.", `${botId}:${updateId}:status`);
+      this.#queueMessage(botId, actor.chatId, lines.length ? lines.join("\n") : "No services are connected.", `${botId}:${updateId}:services`);
       return;
     }
-    if (!normalizedHead.startsWith("/")) {
-      this.#queueMessage(botId, actor.chatId, "Use /help to see the available services.", `${botId}:${updateId}:unknown`);
+
+    if (!slashCommand) {
+      const pending = this.#repository.getPendingInput({ botId, telegramUserId: actor.telegramUserId, chatId: actor.chatId, now: new Date() });
+      if (pending !== undefined) {
+        const binding = this.#repository.getBinding(pending.connection.id);
+        if (binding?.telegram_user_id === actor.telegramUserId && binding.telegram_chat_id === actor.chatId) {
+          await this.#dispatch(botId, updateId, pending.connection, actor, pending.adapterCommand, { text: trimmed }, true);
+          return;
+        }
+        this.#repository.clearPendingInput(botId, actor.telegramUserId, actor.chatId);
+      }
+      const keyboard = this.#repository.getReplyKeyboardRoute({
+        botId,
+        telegramUserId: actor.telegramUserId,
+        chatId: actor.chatId,
+        buttonText: trimmed,
+        now: new Date(),
+      });
+      if (keyboard !== undefined) {
+        const binding = this.#repository.getBinding(keyboard.connection.id);
+        if (binding?.telegram_user_id === actor.telegramUserId && binding.telegram_chat_id === actor.chatId) {
+          await this.#dispatch(botId, updateId, keyboard.connection, actor, keyboard.command, keyboard.arguments);
+          return;
+        }
+      }
+      this.#queueMessage(botId, actor.chatId, "Use /help to see the available commands.", `${botId}:${updateId}:unknown`);
       return;
     }
+
     const commandName = normalizedHead.slice(1);
+    const registered = this.#repository.getConnectionCommand(botId, commandName);
+    if (registered !== undefined) {
+      const target = this.#repository.getConnectionById(registered.connectionId)!;
+      const binding = this.#repository.getBinding(target.id);
+      if (binding?.telegram_user_id !== actor.telegramUserId || binding.telegram_chat_id !== actor.chatId) {
+        this.#queueMessage(botId, actor.chatId, `${target.serviceId} is not linked to this Telegram account.`, `${botId}:${updateId}:denied`);
+        return;
+      }
+      await this.#dispatch(botId, updateId, target, actor, registered.adapterCommand, { text: tail.join(" ") });
+      return;
+    }
+
     let prefix = commandName;
     let command = tail.shift()?.toLowerCase() ?? "start";
     const underscore = commandName.indexOf("_");
@@ -597,7 +854,7 @@ export class GryphonGateway {
     }
     const target = this.#repository.getConnectionByPrefix(botId, prefix);
     if (target === undefined) {
-      this.#queueMessage(botId, actor.chatId, "Unknown service command. Use /help.", `${botId}:${updateId}:unknown-service`);
+      this.#queueMessage(botId, actor.chatId, "Unknown command. Use /help.", `${botId}:${updateId}:unknown-service`);
       return;
     }
     const binding = this.#repository.getBinding(target.id);
@@ -608,8 +865,8 @@ export class GryphonGateway {
     await this.#dispatch(botId, updateId, target, actor, command, { text: tail.join(" ") });
   }
 
-  async #dispatch(botId: string, updateId: string, target: ConnectionRecord, actor: TelegramActor, command: string, argumentsValue: Readonly<Record<string, unknown>>): Promise<void> {
-    if (!COMMAND_PREFIX.test(command)) throw new GryphonError("invalid_command");
+  async #dispatch(botId: string, updateId: string, target: ConnectionRecord, actor: TelegramActor, command: string, argumentsValue: Readonly<Record<string, unknown>>, clearPendingAfterResponse = false): Promise<void> {
+    if (!COMMAND_NAME.test(command)) throw new GryphonError("invalid_command");
     const correlationId = randomUUID();
     const envelope: CommandEnvelope = {
       schema: "exocortex.telegram.command.v1",
@@ -626,6 +883,9 @@ export class GryphonGateway {
     for (const current of result.actions) {
       await this.#queueAction(botId, target, actor, current, `${botId}:${updateId}:action:${String(index)}`);
       index += 1;
+    }
+    if (clearPendingAfterResponse && !result.actions.some((current) => current.expectInput !== undefined)) {
+      this.#repository.clearPendingInput(botId, actor.telegramUserId, actor.chatId);
     }
   }
 
@@ -646,6 +906,40 @@ export class GryphonGateway {
         return { text: button.text, callback_data: token };
       }));
       replyMarkup = { inline_keyboard: keyboard };
+    } else if (current.replyKeyboard !== undefined) {
+      try {
+        this.#repository.replaceReplyKeyboardRoutes({
+          botId,
+          connectionId: target.id,
+          telegramUserId: actor.telegramUserId,
+          chatId: actor.chatId,
+          rows: current.replyKeyboard.rows.map((row) => row.map((button) => ({
+            text: button.text,
+            command: button.command,
+            arguments: button.arguments ?? {},
+          }))),
+          expiresAt: new Date(Date.now() + 10 * 365 * 86_400_000),
+        });
+      } catch (error) {
+        if (error instanceof ReplyKeyboardConflictError) throw new GryphonError("reply_keyboard_conflict", 502);
+        throw error;
+      }
+      replyMarkup = {
+        keyboard: current.replyKeyboard.rows.map((row) => row.map((button) => ({ text: button.text }))),
+        is_persistent: true,
+        resize_keyboard: current.replyKeyboard.resize,
+        ...(current.replyKeyboard.placeholder === undefined ? {} : { input_field_placeholder: current.replyKeyboard.placeholder }),
+      };
+    }
+    if (current.expectInput !== undefined) {
+      this.#repository.setPendingInput({
+        botId,
+        connectionId: target.id,
+        telegramUserId: actor.telegramUserId,
+        chatId: actor.chatId,
+        adapterCommand: current.expectInput.command,
+        expiresAt: new Date(Date.now() + current.expectInput.expiresInSeconds * 1_000),
+      });
     }
     this.#queueMessage(botId, actor.chatId, current.text, idempotencyKey, replyMarkup);
   }

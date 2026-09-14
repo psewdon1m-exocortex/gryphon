@@ -11,6 +11,10 @@ export interface TelegramTransport {
     readonly secretToken: string;
     readonly maxConnections: number;
   }): Promise<void>;
+  setCommands(input: {
+    readonly chatId?: string;
+    readonly commands: readonly TelegramCommand[];
+  }): Promise<void>;
   sendMessage(input: {
     readonly chatId: string;
     readonly text: string;
@@ -21,6 +25,11 @@ export interface TelegramTransport {
     readonly text?: string;
     readonly showAlert?: boolean;
   }): Promise<void>;
+}
+
+export interface TelegramCommand {
+  readonly command: string;
+  readonly description: string;
 }
 
 export interface TelegramActor {
@@ -47,10 +56,24 @@ export interface ResponseButton {
   readonly arguments?: Readonly<Record<string, unknown>>;
 }
 
+export interface ReplyKeyboard {
+  readonly persistent: true;
+  readonly resize: boolean;
+  readonly placeholder?: string;
+  readonly rows: readonly (readonly ResponseButton[])[];
+}
+
+export interface ExpectedInput {
+  readonly command: string;
+  readonly expiresInSeconds: number;
+}
+
 export interface ResponseAction {
   readonly type: "send_message";
   readonly text: string;
   readonly buttons?: readonly (readonly ResponseButton[])[];
+  readonly replyKeyboard?: ReplyKeyboard;
+  readonly expectInput?: ExpectedInput;
 }
 
 export interface CommandResponse {
@@ -78,6 +101,18 @@ export interface ConnectionRecord {
   readonly adapterUrl: string;
   readonly serviceTokenPath: string;
   readonly state: "enabled" | "disabled";
+}
+
+export interface CommandCatalogEntry {
+  readonly name: string;
+  readonly adapterCommand: string;
+  readonly description: string;
+}
+
+export interface ConnectionCommandRecord extends CommandCatalogEntry {
+  readonly connectionId: string;
+  readonly botId: string;
+  readonly serviceId: string;
 }
 
 export type TransportFactory = (token: string) => TelegramTransport;
