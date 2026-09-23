@@ -90,6 +90,7 @@ export function createClientServer(gateway: GryphonGateway): http.Server {
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/service/link-challenges") return send(response, 201, gateway.issueServiceLink(authorization));
+      if (request.method === "DELETE" && url.pathname === "/v1/service/link-challenges") return send(response, 200, gateway.cancelServiceLinkChallenge(authorization));
       if (request.method === "DELETE" && url.pathname === "/v1/service/binding") {
         const result = await gateway.revokeServiceLink(authorization);
         send(response, 200, result);

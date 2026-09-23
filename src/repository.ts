@@ -417,6 +417,10 @@ export class GryphonRepository {
       WHERE c.bot_id=? AND c.state='enabled' ORDER BY tb.telegram_chat_id,tb.telegram_user_id`).all(botId) as unknown as BindingRecord[];
   }
 
+  cancelChallenges(connectionId: string): boolean {
+    return Number(this.#database.prepare("DELETE FROM link_challenges WHERE connection_id=? AND consumed_at IS NULL").run(connectionId).changes) > 0;
+  }
+
   createChallenge(connectionId: string, digest: string, now: Date, expiresAt: Date): void {
     this.transaction(() => {
       this.#database.prepare("DELETE FROM link_challenges WHERE connection_id=? AND consumed_at IS NULL").run(connectionId);

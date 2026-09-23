@@ -568,6 +568,7 @@ export class GryphonGateway {
       version: this.#config.version,
       serviceId: target.serviceId,
       state: connection?.state ?? "unlinked",
+      connectionId: connection?.id ?? null,
       connected: connection !== undefined,
       commandPrefix: connection?.commandPrefix ?? null,
       commands: connection === undefined ? [] : this.#repository.listConnectionCommands(connection.id).map((item) => ({
@@ -581,13 +582,23 @@ export class GryphonGateway {
         username: current.username,
         state: current.state,
       },
-      binding: binding === undefined ? null : { linkedAt: binding.linked_at },
+      binding: binding === undefined ? null : {
+        linkedAt: binding.linked_at,
+        telegramUserId: binding.telegram_user_id,
+        chatId: binding.telegram_chat_id,
+      },
     };
   }
 
   issueServiceLink(authorization: string): ReturnType<GryphonGateway["issueLink"]> {
     const target = this.authenticateService(authorization);
     return this.issueLink(target.serviceId);
+  }
+
+  cancelServiceLinkChallenge(authorization: string): { readonly cancelled: boolean } {
+    const target = this.authenticateService(authorization);
+    const connection = this.#repository.getConnectionByService(target.serviceId);
+    return { cancelled: connection !== undefined && this.#repository.cancelChallenges(connection.id) };
   }
 
   revokeServiceLink(authorization: string): Promise<{ readonly revoked: boolean }> {

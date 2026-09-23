@@ -109,6 +109,36 @@ function message(updateId: number, userId: number, text: string) {
 }
 
 describe("Gryphon gateway", () => {
+  it("reports a service-scoped stable identity for Mastermind without authorizing another service", async () => {
+    const token = "100000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const test = fixture({ [token]: { id: "10", username: "shared_bot" } });
+    const own = await connect(test, { serviceId: "mastermind", commandPrefix: "mastermind", adapterUrl: "http://mastermind.test/internal/gryphon/command", alias: "personal", botToken: token, serviceToken: "service-secret-token-value-0001" });
+    await connect(test, { serviceId: "saturn", commandPrefix: "saturn", adapterUrl: "http://saturn.test/internal/gryphon/command", alias: "personal", botToken: token, serviceToken: "saturn-service-secret-token-0002" });
+    const challenge = test.gateway.issueServiceLink("Bearer service-secret-token-value-0001");
+    test.gateway.acceptUpdate(own.bot.webhookKey, own.bot.webhookSecret, message(1, 12345, challenge.command));
+    await test.gateway.drain();
+    const status = test.gateway.serviceStatus("Bearer service-secret-token-value-0001");
+    expect(status.connectionId).toBe(own.connection.id);
+    expect(status.binding).toMatchObject({ telegramUserId: "12345", chatId: "12345" });
+    expect(test.gateway.serviceStatus("Bearer saturn-service-secret-token-0002").binding).toBeNull();
+    expect(JSON.stringify(status)).not.toContain(token);
+    test.repository.close();
+  });
+  it("cancels only the calling service's unconsumed linking challenge", async () => {
+    const token = "100000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const test = fixture({ [token]: { id: "10", username: "shared_bot" } });
+    await connect(test, { serviceId: "chronos", commandPrefix: "chronos", adapterUrl: "http://chronos.test/internal/gryphon/command", alias: "personal", botToken: token, serviceToken: "service-secret-token-value-0001" });
+    await connect(test, { serviceId: "saturn", commandPrefix: "saturn", adapterUrl: "http://saturn.test/internal/gryphon/command", alias: "personal", botToken: token, serviceToken: "saturn-service-secret-token-0002" });
+    test.gateway.issueServiceLink("Bearer service-secret-token-value-0001");
+    test.gateway.issueServiceLink("Bearer saturn-service-secret-token-0002");
+    expect(() => test.gateway.cancelServiceLinkChallenge("Bearer wrong")).toThrow();
+    expect(test.gateway.cancelServiceLinkChallenge("Bearer service-secret-token-value-0001")).toEqual({ cancelled: true });
+    expect(test.gateway.cancelServiceLinkChallenge("Bearer service-secret-token-value-0001")).toEqual({ cancelled: false });
+    expect(test.gateway.cancelServiceLinkChallenge("Bearer saturn-service-secret-token-0002")).toEqual({ cancelled: true });
+    expect(test.repository.getConnectionByService("chronos")).toBeDefined();
+    expect(test.repository.getConnectionByService("saturn")).toBeDefined();
+    test.repository.close();
+  });
   it("reuses one bot runtime for two services using the same bot token", async () => {
     const token = "100000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const test = fixture({ [token]: { id: "10", username: "shared_bot" } });
