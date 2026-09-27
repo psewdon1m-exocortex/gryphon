@@ -96,12 +96,21 @@ async function connect(test: ReturnType<typeof fixture>, input: {
   fs.mkdirSync(test.config.clientsDirectory, { recursive: true });
   fs.writeFileSync(path.join(test.config.clientsDirectory, `${input.serviceId}.token`), input.serviceToken);
   const connected = await test.gateway.connectBot({ alias: input.alias, botToken: input.botToken });
+  if (!test.gateway.botPaired(connected.bot.id)) {
+    const pairing = test.gateway.issueBotLink(connected.bot.id);
+    test.gateway.acceptUpdate(connected.bot.webhookKey, connected.bot.webhookSecret, message(900000, 42, pairing.command));
+    await test.gateway.drain();
+  }
   test.gateway.connectService(`Bearer ${input.serviceToken}`, {
     botId: connected.bot.id,
     commandPrefix: input.commandPrefix,
     adapterUrl: input.adapterUrl,
   });
-  return { ...connected, connection: test.repository.getConnectionByService(input.serviceId)! };
+  const connection = test.repository.getConnectionByService(input.serviceId)!;
+  // Legacy service-link cases below start without a service binding. New
+  // connections themselves attach the paired owner and are tested separately.
+  test.repository.revokeBinding(connection.id);
+  return { ...connected, connection };
 }
 
 function message(updateId: number, userId: number, text: string) {
@@ -109,6 +118,30 @@ function message(updateId: number, userId: number, text: string) {
 }
 
 describe("Gryphon gateway", () => {
+  it("pairs one bot owner in Gryphon and grants each selected service without another link code", async () => {
+    const token = "100009:iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii";
+    const test = fixture({ [token]: { id: "19", username: "owner_bot" } });
+    fs.mkdirSync(test.config.clientsDirectory, { recursive: true });
+    fs.writeFileSync(path.join(test.config.clientsDirectory, "chronos.token"), "service-secret-token-value-0001");
+    fs.writeFileSync(path.join(test.config.clientsDirectory, "saturn.token"), "saturn-service-secret-token-0002");
+    const created = await test.gateway.connectBot({ alias: "owner", botToken: token });
+    expect(test.gateway.serviceBots("Bearer service-secret-token-value-0001").bots).toEqual([]);
+    expect(() => test.gateway.connectService("Bearer service-secret-token-value-0001", { botId: created.bot.id, commandPrefix: "chronos", adapterUrl: "http://chronos.test/internal/gryphon/command" }))
+      .toThrowError(expect.objectContaining({ code: "bot_not_paired" }));
+    const challenge = test.gateway.issueBotLink(created.bot.id);
+    test.gateway.acceptUpdate(created.bot.webhookKey, created.bot.webhookSecret, message(1, 42, challenge.command));
+    await test.gateway.drain();
+    expect(test.gateway.botPaired(created.bot.id)).toBe(true);
+    for (const [serviceId, secret] of [["chronos", "service-secret-token-value-0001"], ["saturn", "saturn-service-secret-token-0002"]] as const) {
+      const status = test.gateway.connectService(`Bearer ${secret}`, { botId: created.bot.id, commandPrefix: serviceId, adapterUrl: `http://${serviceId}.test/internal/gryphon/command` });
+      expect(status.binding).toMatchObject({ telegramUserId: "42", chatId: "42" });
+    }
+    await test.gateway.revokeServiceLink("Bearer saturn-service-secret-token-0002");
+    expect(test.gateway.serviceStatus("Bearer saturn-service-secret-token-0002").binding).toBeNull();
+    expect(test.gateway.serviceStatus("Bearer service-secret-token-value-0001").binding).toMatchObject({ telegramUserId: "42" });
+    expect(test.gateway.attachServiceOwner("Bearer saturn-service-secret-token-0002").binding).toMatchObject({ telegramUserId: "42", chatId: "42" });
+    test.repository.close();
+  });
   it("reports a service-scoped stable identity for Mastermind without authorizing another service", async () => {
     const token = "100000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const test = fixture({ [token]: { id: "10", username: "shared_bot" } });
@@ -231,6 +264,9 @@ describe("Gryphon gateway", () => {
     fs.mkdirSync(test.config.clientsDirectory, { recursive: true });
     fs.writeFileSync(path.join(test.config.clientsDirectory, "chronos.token"), "service-secret-token-value-0001");
     const bot = await test.gateway.connectBot({ alias: "chronos", botToken: token });
+    const pairing = test.gateway.issueBotLink(bot.bot.id);
+    test.gateway.acceptUpdate(bot.bot.webhookKey, bot.bot.webhookSecret, message(900000, 42, pairing.command));
+    await test.gateway.drain();
     expect(() => test.gateway.connectService("Bearer service-secret-token-value-0001", { botId: bot.bot.id, commandPrefix: "saturn", adapterUrl: "http://chronos.test/internal/gryphon/command" }))
       .toThrowError(expect.objectContaining({ code: "invalid_command_prefix" }));
     expect(() => test.gateway.connectService("Bearer service-secret-token-value-0001", { botId: bot.bot.id, commandPrefix: "chronos", adapterUrl: "http://saturn.test/internal/gryphon/command" }))

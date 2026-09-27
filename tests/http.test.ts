@@ -82,12 +82,26 @@ describe("Gryphon HTTP boundaries", () => {
         body: JSON.stringify({ alias: "chronos", botToken }),
       });
       expect(connected.status).toBe(201);
-      const connectionBody = JSON.stringify(await connected.json());
+      const created = await connected.json() as { readonly bot: { readonly id: string } };
+      const connectionBody = JSON.stringify(created);
       expect(connectionBody).not.toContain(botToken);
       expect(connectionBody).not.toContain(serviceToken);
       expect(connectionBody).not.toContain("tokenPath");
       const botList = await fetch(`${adminOrigin}/v1/bots`);
       expect(await botList.json()).toMatchObject({ schema: "exocortex.gryphon.bots.v1", bots: [{ alias: "chronos", state: "ready" }] });
+
+      const pairResponse = await fetch(`${adminOrigin}/v1/bots/${created.bot.id}/link`, { method: "POST" });
+      expect(pairResponse.status).toBe(201);
+      const pairing = await pairResponse.json() as { readonly command: string };
+      expect(webhook).toBeDefined();
+      const webhookPath = new URL(webhook!.url).pathname;
+      const pair = await fetch(`${publicOrigin}${webhookPath}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": webhook!.secretToken },
+        body: JSON.stringify({ update_id: 1, message: { text: pairing.command, from: { id: 42, is_bot: false, first_name: "Owner" }, chat: { id: 42, type: "private" } } }),
+      });
+      expect(pair.status).toBe(202);
+      await gateway.drain();
 
       const initialStatus = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
       expect(initialStatus.status).toBe(200);
@@ -118,23 +132,12 @@ describe("Gryphon HTTP boundaries", () => {
         commands: [{ name: "timer", adapterCommand: "menu", description: "Open activity controls" }],
       });
 
-      const challengeResponse = await fetch(`${clientOrigin}/v1/service/link-challenges`, { method: "POST", headers: { "Authorization": `Bearer ${serviceToken}` } });
-      const challenge = await challengeResponse.json() as { readonly command: string };
-      expect(webhook).toBeDefined();
-      const webhookPath = new URL(webhook!.url).pathname;
       const forgedWebhook = await fetch(`${publicOrigin}${webhookPath}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "wrong-secret" },
         body: JSON.stringify({ update_id: 999 }),
       });
       expect(forgedWebhook.status).toBe(401);
-      const link = await fetch(`${publicOrigin}${webhookPath}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": webhook!.secretToken },
-        body: JSON.stringify({ update_id: 1, message: { text: challenge.command, from: { id: 42, is_bot: false, first_name: "Owner" }, chat: { id: 42, type: "private" } } }),
-      });
-      expect(link.status).toBe(202);
-      await gateway.drain();
 
       const serviceStatus = await fetch(`${clientOrigin}/v1/service`, { headers: { "Authorization": `Bearer ${serviceToken}` } });
       expect(serviceStatus.status).toBe(200);
@@ -155,7 +158,7 @@ describe("Gryphon HTTP boundaries", () => {
       });
       expect(notification.status).toBe(202);
       await gateway.drain();
-      expect(sent).toContain("chronos linked to this Telegram account.");
+      expect(sent).toContain("Bot paired with Gryphon. Services can now select it in Settings.");
       expect(sent).toContain("Chronos reminder");
 
       const disconnected = await fetch(`${clientOrigin}/v1/service/connection`, { method: "DELETE", headers: { "Authorization": `Bearer ${serviceToken}` } });

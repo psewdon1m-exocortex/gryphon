@@ -89,7 +89,8 @@ export function createClientServer(gateway: GryphonGateway): http.Server {
         void gateway.drain();
         return;
       }
-      if (request.method === "POST" && url.pathname === "/v1/service/link-challenges") return send(response, 201, gateway.issueServiceLink(authorization));
+      if (request.method === "POST" && url.pathname === "/v1/service/link-challenges") throw new GryphonError("pair_bot_with_updater_tui", 410);
+      if (request.method === "PUT" && url.pathname === "/v1/service/binding") return send(response, 200, gateway.attachServiceOwner(authorization));
       if (request.method === "DELETE" && url.pathname === "/v1/service/link-challenges") return send(response, 200, gateway.cancelServiceLinkChallenge(authorization));
       if (request.method === "DELETE" && url.pathname === "/v1/service/binding") {
         const result = await gateway.revokeServiceLink(authorization);
@@ -131,6 +132,7 @@ export function createAdminServer(gateway: GryphonGateway): http.Server {
         });
         return send(response, 201, {
           reusedBot: result.reusedBot,
+          paired: gateway.botPaired(result.bot.id),
           bot: {
             id: result.bot.id,
             telegramBotId: result.bot.telegramBotId,
@@ -140,8 +142,10 @@ export function createAdminServer(gateway: GryphonGateway): http.Server {
           },
         });
       }
+      const pair = /^\/v1\/bots\/([0-9a-f-]{36})\/link$/.exec(url.pathname);
+      if (request.method === "POST" && pair?.[1] !== undefined) return send(response, 201, gateway.issueBotLink(pair[1]));
       const issue = /^\/v1\/links\/([a-z][a-z0-9-]{1,47})$/.exec(url.pathname);
-      if (request.method === "POST" && issue?.[1] !== undefined) return send(response, 201, gateway.issueLink(issue[1]));
+      if (request.method === "POST" && issue?.[1] !== undefined) throw new GryphonError("pair_bot_with_updater_tui", 410);
       if (request.method === "DELETE" && issue?.[1] !== undefined) {
         const result = await gateway.revokeLink(issue[1]);
         send(response, 200, result);

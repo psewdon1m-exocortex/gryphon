@@ -45,6 +45,13 @@ export interface BindingRecord {
   readonly linked_at: string;
 }
 
+export interface BotBindingRecord {
+  readonly bot_id: string;
+  readonly telegram_user_id: string;
+  readonly telegram_chat_id: string;
+  readonly linked_at: string;
+}
+
 interface CommandRow {
   readonly connection_id: string;
   readonly bot_id: string;
@@ -158,6 +165,20 @@ export class GryphonRepository {
         telegram_chat_id TEXT NOT NULL,
         linked_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS bot_bindings (
+        bot_id TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+        telegram_user_id TEXT NOT NULL,
+        telegram_chat_id TEXT NOT NULL,
+        linked_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bot_link_challenges (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        code_digest TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      );
       CREATE TABLE IF NOT EXISTS connection_commands (
         connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -237,6 +258,13 @@ export class GryphonRepository {
         completed_at TEXT
       );
     `);
+    // Existing service bindings stay valid. A bot with one consistent Telegram
+    // identity can be paired automatically; conflicting identities require TUI pairing.
+    this.#database.exec(`INSERT OR IGNORE INTO bot_bindings (bot_id,telegram_user_id,telegram_chat_id,linked_at)
+      SELECT c.bot_id,MIN(tb.telegram_user_id),MIN(tb.telegram_chat_id),MIN(tb.linked_at)
+      FROM telegram_bindings tb JOIN connections c ON c.id=tb.connection_id
+      GROUP BY c.bot_id
+      HAVING COUNT(DISTINCT tb.telegram_user_id || char(0) || tb.telegram_chat_id)=1;`);
     this.#database.exec("UPDATE telegram_updates SET state='queued' WHERE state='processing'; UPDATE delivery_outbox SET state='queued' WHERE state='processing';");
     this.#database.exec(`CREATE TABLE IF NOT EXISTS queue_sizes (name TEXT PRIMARY KEY, records INTEGER NOT NULL, bytes INTEGER NOT NULL);`);
     for (const [table, payload] of [["telegram_updates", "body_json"], ["delivery_outbox", "payload_json"], ["callbacks", "arguments_json"]] as const) {
@@ -264,6 +292,7 @@ export class GryphonRepository {
       this.#database.prepare("DELETE FROM delivery_outbox WHERE state='completed' AND completed_at<?").run(cutoff);
       this.#database.prepare("DELETE FROM callbacks WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
       this.#database.prepare("DELETE FROM link_challenges WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
+      this.#database.prepare("DELETE FROM bot_link_challenges WHERE expires_at<=? OR consumed_at IS NOT NULL").run(now.toISOString());
       this.#database.prepare("DELETE FROM reply_keyboard_routes WHERE expires_at<=?").run(now.toISOString());
       this.#database.prepare("DELETE FROM pending_inputs WHERE expires_at<=?").run(now.toISOString());
       this.#database.exec("UPDATE telegram_updates SET body_json='{}' WHERE state='completed' AND body_json<>'{}'; UPDATE delivery_outbox SET payload_json='{}' WHERE state='completed' AND payload_json<>'{}';");
@@ -403,6 +432,14 @@ export class GryphonRepository {
     return this.getConnectionById(id)!;
   }
 
+  createPairedConnection(input: Omit<ConnectionRecord, "id" | "state">, now: Date): ConnectionRecord {
+    return this.transaction(() => {
+      const connection = this.createConnection(input, now);
+      if (!this.attachBindingFromBot(connection.id, input.botId)) throw new Error("bot_not_paired");
+      return connection;
+    });
+  }
+
   deleteConnection(serviceId: string): boolean {
     return Number(this.#database.prepare("DELETE FROM connections WHERE service_id=?").run(serviceId).changes) > 0;
   }
@@ -419,6 +456,40 @@ export class GryphonRepository {
 
   cancelChallenges(connectionId: string): boolean {
     return Number(this.#database.prepare("DELETE FROM link_challenges WHERE connection_id=? AND consumed_at IS NULL").run(connectionId).changes) > 0;
+  }
+
+  getBotBinding(botId: string): BotBindingRecord | undefined {
+    return this.#database.prepare("SELECT * FROM bot_bindings WHERE bot_id=?").get(botId) as unknown as BotBindingRecord | undefined;
+  }
+
+  createBotChallenge(botId: string, digest: string, now: Date, expiresAt: Date): void {
+    this.transaction(() => {
+      this.#database.prepare("DELETE FROM bot_link_challenges WHERE bot_id=? AND consumed_at IS NULL").run(botId);
+      this.#database.prepare("INSERT INTO bot_link_challenges (id,bot_id,code_digest,created_at,expires_at) VALUES (?,?,?,?,?)")
+        .run(randomUUID(), botId, digest, now.toISOString(), expiresAt.toISOString());
+    });
+  }
+
+  consumeBotChallenge(input: { readonly botId: string; readonly digest: string; readonly telegramUserId: string; readonly chatId: string; readonly now: Date }): boolean {
+    return this.transaction(() => {
+      if (this.getBotBinding(input.botId) !== undefined) return false;
+      const row = this.#database.prepare(`SELECT id FROM bot_link_challenges
+        WHERE bot_id=? AND code_digest=? AND consumed_at IS NULL AND expires_at>? LIMIT 1`)
+        .get(input.botId, input.digest, input.now.toISOString()) as { readonly id: string } | undefined;
+      if (row === undefined) return false;
+      this.#database.prepare("INSERT INTO bot_bindings (bot_id,telegram_user_id,telegram_chat_id,linked_at) VALUES (?,?,?,?)")
+        .run(input.botId, input.telegramUserId, input.chatId, input.now.toISOString());
+      this.#database.prepare("UPDATE bot_link_challenges SET consumed_at=? WHERE id=?").run(input.now.toISOString(), row.id);
+      return true;
+    });
+  }
+
+  attachBindingFromBot(connectionId: string, botId: string): boolean {
+    if (this.getBinding(connectionId) !== undefined) return false;
+    const result = this.#database.prepare(`INSERT INTO telegram_bindings (connection_id,telegram_user_id,telegram_chat_id,linked_at)
+      SELECT ?,telegram_user_id,telegram_chat_id,linked_at FROM bot_bindings WHERE bot_id=?`)
+      .run(connectionId, botId);
+    return Number(result.changes) === 1;
   }
 
   createChallenge(connectionId: string, digest: string, now: Date, expiresAt: Date): void {

@@ -357,8 +357,22 @@ export class GryphonGateway {
     return {
       schema: "exocortex.gryphon.bots.v1",
       version: this.#config.version,
-      bots: this.#repository.listBots().map((current) => ({ id: current.id, alias: current.alias, telegramBotId: current.telegramBotId, username: current.username, state: current.state })),
+      bots: this.#repository.listBots().map((current) => ({ id: current.id, alias: current.alias, telegramBotId: current.telegramBotId, username: current.username, state: current.state, paired: this.#repository.getBotBinding(current.id) !== undefined })),
     };
+  }
+
+  botPaired(botId: string): boolean { return this.#repository.getBotBinding(botId) !== undefined; }
+
+  issueBotLink(botId: string, now = new Date()): { readonly code: string; readonly expiresAt: string; readonly command: string; readonly botUsername?: string } {
+    const bot = this.#repository.getBotById(botId);
+    if (bot === undefined) throw new GryphonError("bot_not_found", 404);
+    if (bot.state !== "ready") throw new GryphonError("bot_not_ready", 409);
+    if (this.#repository.getBotBinding(botId) !== undefined) throw new GryphonError("bot_already_paired", 409);
+    let code = "";
+    for (let index = 0; index < 8; index += 1) code += LINK_ALPHABET[randomBytes(1)[0]! % LINK_ALPHABET.length];
+    const expiresAt = new Date(now.getTime() + 10 * 60_000);
+    this.#repository.createBotChallenge(botId, this.#linkDigest(bot.telegramBotId, code), now, expiresAt);
+    return { code, expiresAt: expiresAt.toISOString(), command: `/link ${code}`, ...(bot.username === undefined ? {} : { botUsername: bot.username }) };
   }
 
   #commandsForActor(botId: string, telegramUserId: string, chatId: string): readonly TelegramCommand[] {
@@ -462,7 +476,7 @@ export class GryphonGateway {
     return {
       schema: "exocortex.gryphon.service-bots.v1",
       serviceId: target.serviceId,
-      bots: this.#repository.listBots().map((current) => ({
+      bots: this.#repository.listBots().filter((current) => this.#repository.getBotBinding(current.id) !== undefined || target.connection?.botId === current.id).map((current) => ({
         id: current.id,
         alias: current.alias,
         username: current.username,
@@ -480,12 +494,13 @@ export class GryphonGateway {
     const bot = this.#repository.getBotById(input.botId);
     if (bot === undefined) throw new GryphonError("bot_not_found", 404);
     if (bot.state !== "ready") throw new GryphonError("bot_not_ready", 409);
+    if (this.#repository.getBotBinding(bot.id) === undefined) throw new GryphonError("bot_not_paired", 409);
     let adapter: URL;
     try { adapter = new URL(input.adapterUrl); } catch { throw new GryphonError("invalid_adapter_url"); }
     const serviceHost = this.#config.kernelOrigin ? adapter.protocol === "https:" : adapter.hostname === target.serviceId || adapter.hostname.startsWith(`${target.serviceId}.`);
     if (!(["http:", "https:"].includes(adapter.protocol)) || !serviceHost || adapter.username || adapter.password || adapter.hash || adapter.search) throw new GryphonError("invalid_adapter_url");
     try {
-      this.#repository.createConnection({
+      this.#repository.createPairedConnection({
         serviceId: target.serviceId,
         botId: bot.id,
         commandPrefix: input.commandPrefix,
@@ -593,6 +608,14 @@ export class GryphonGateway {
   issueServiceLink(authorization: string): ReturnType<GryphonGateway["issueLink"]> {
     const target = this.authenticateService(authorization);
     return this.issueLink(target.serviceId);
+  }
+
+  attachServiceOwner(authorization: string): Readonly<Record<string, unknown>> {
+    const target = this.authenticateService(authorization);
+    if (target.connection === undefined) throw new GryphonError("connection_not_found", 404);
+    if (!this.#repository.attachBindingFromBot(target.connection.id, target.connection.botId)) throw new GryphonError("binding_already_present_or_bot_not_paired", 409);
+    this.#queueBotCommandMenus(target.connection.botId);
+    return this.serviceStatus(authorization);
   }
 
   cancelServiceLinkChallenge(authorization: string): { readonly cancelled: boolean } {
@@ -790,6 +813,12 @@ export class GryphonGateway {
     if (normalizedHead === "/link") {
       const code = (tail[0] ?? "").toUpperCase();
       const current = this.#repository.getBotById(botId)!;
+      const paired = /^[A-HJ-NP-Z2-9]{8}$/.test(code) && this.#repository.consumeBotChallenge({ botId, digest: this.#linkDigest(current.telegramBotId, code), telegramUserId: actor.telegramUserId, chatId: actor.chatId, now: new Date() });
+      if (paired) {
+        this.#queueMessage(botId, actor.chatId, "Bot paired with Gryphon. Services can now select it in Settings.", `${botId}:${updateId}:link`);
+        this.#queueCommandMenu(botId, this.#commandsForActor(botId, actor.telegramUserId, actor.chatId), actor.chatId);
+        return;
+      }
       const target = /^[A-HJ-NP-Z2-9]{8}$/.test(code)
         ? this.#repository.consumeChallenge({ botId, digest: this.#linkDigest(current.telegramBotId, code), telegramUserId: actor.telegramUserId, chatId: actor.chatId, now: new Date() })
         : undefined;

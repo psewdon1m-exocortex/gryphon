@@ -26,9 +26,9 @@ failed, unknown or unsupported `N/A` evidence blocks publication. This is a
 normative release requirement; until the repository workflow generates and
 enforces that report, the release pipeline remains an implementation gap.
 
-Gryphon is the single Telegram transport gateway for Exocortex services. It owns bot tokens, webhooks, update deduplication, service-scoped identity bindings, callback buttons and outbound delivery. Chronos and Saturn expose authenticated internal command adapters and do not talk to Telegram directly.
+Gryphon is the single Telegram transport gateway for Exocortex services. It owns bot tokens, webhooks, update deduplication, bot identity bindings, service connections, callback buttons and outbound delivery. Chronos, Saturn and Mastermind expose authenticated internal command adapters and do not talk to Telegram directly.
 
-One service connection selects one bot. Different services may use the same token (one shared Telegram receiver) or different tokens (independent receivers). A binding belongs to the service connection, not globally to the bot, so the same Telegram account can link Chronos without automatically gaining access to Saturn.
+One bot is paired to one Telegram account with a single `/link CODE` in Updater TUI. Each service owner then selects any paired bot in that service's Settings. Selecting it grants that bot's paired account access to the service; several services may select the same bot. A service owner can revoke that service's binding without disconnecting the bot or changing access to other services.
 
 ## Run locally
 
@@ -50,58 +50,13 @@ docker network create exocortex-services
 
 The public listener accepts only Telegram webhooks. Services use an authenticated, service-scoped Unix socket for status, linking and notifications. Administrative operations use a different Unix socket (or Windows named pipe) and are intentionally not exposed over TCP.
 
-For the initial six-service deployment, Saturn Settings can install Gryphon and
-register a bot through typed, authenticated Updater operations. The bot token is
-transient input; only Gryphon retains its protected copy. The privileged CLI
-provides the same bot registration operation:
-
-```powershell
-node dist/cli.js bot connect main
-node dist/cli.js bot connect private
-node dist/cli.js bot list
-```
-
-Each connect command prompts for the Telegram bot token without echoing it,
-verifies the bot identity with Telegram and registers the webhook. Gryphon then
-stores its own protected token copy; no operator-created token file is required.
-Use `--bot-token-file PATH` only for non-interactive automation.
+Use `sudo updater tui` on the host to install and update the shared Gryphon instance and to register a bot. Initial installation may ask for a registered service to supply Kernel release configuration and enroll that service; update checks and bot registration do not ask for one. Enter the bot alias and Telegram token in the TUI. Updater sends the token only to Gryphon's root-only admin socket. Gryphon verifies the bot with Telegram, registers the webhook and stores its protected token copy. The TUI displays a short-lived `/link CODE`; send it to the bot from the Telegram account that should own it. The TUI's bot list shows when pairing is complete.
 
 Each service installer provisions one service credential under
 `/etc/gryphon/clients/<service>.token` and mounts the same file read-only into
-that service. In Chronos or Saturn Settings, **Link service function** lists the
-bots above and stores only the selected bot, the fixed service command prefix,
-and the service adapter URL. Multiple services can select the same bot; each can
-also select a different one.
+that service. In Chronos, Saturn or Mastermind Settings, **Link service function** lists paired bots and stores only the selected bot, the fixed service command prefix and the service adapter URL. The service connection receives the paired Telegram identity automatically. No second `/link` is needed. If a service binding is later revoked in Settings, **Link Telegram account** restores the paired identity for that service.
 
-When Gryphon runs through Compose, invoke the interactive CLI in a one-off
-container that shares the daemon's private admin socket:
-
-```sh
-docker compose run --rm --no-deps \
-  --entrypoint node gryphon dist/cli.js bot connect main
-```
-
-## Bind through the CLI
-
-```powershell
-node dist/cli.js link issue chronos
-node dist/cli.js link issue saturn
-node dist/cli.js status
-```
-
-For Compose, replace `node dist/cli.js` with
-`docker compose run --rm --no-deps --entrypoint node gryphon dist/cli.js`; link
-and status commands need no secret-file mount.
-
-This second link is deliberately separate from connecting a bot to a service:
-it authorizes one Telegram user to execute that service's commands. The issue
-command prints a short-lived `/link CODE` command. Send it to the bot selected in
-the service UI. Codes are single-use and service-scoped. To remove one user
-binding and let the service revoke identity-scoped access before it disappears:
-
-```powershell
-node dist/cli.js link revoke chronos
-```
+Existing service bindings remain in place during upgrade. When all existing connections to a bot use the same Telegram identity, Gryphon pairs that bot automatically. If they disagree, the operator must pair the bot in the TUI before adding a new service connection. Deploy Gryphon and Updater before updating the service interfaces; older service clients may still request service-level link codes, which the new Gryphon rejects.
 
 Services publish their user-facing commands through the authenticated client
 socket:
@@ -165,7 +120,7 @@ Release tags use `gryphon-vMAJOR.MINOR.PATCH` and the version sequence starts
 at `0.0.1`. A plain `v0.0.1`-style tag runs verification-only CI and cannot
 publish or mutate a release. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
-first installation, use Saturn Settings → Bot connection → Install Gryphon.
+first installation, use `sudo updater tui` → Gryphon → Install Gryphon.
 Gryphon's private signing key remains only in GitHub Secrets; the protected
 release job signs the manifest and publishes the public counterpart. The
 exact-version Updater bootstrap verifies its own signed installer before
@@ -183,9 +138,7 @@ only the exact `gryphon-v*` namespace reaches the protected release job.
 Legacy `gryphon-linux-v*` tags remain immutable historical records and no
 longer trigger publication.
 
-Subsequent updates are performed by Updater through
-`/v1/components/gryphon-linux/check` and
-`/v1/components/gryphon-linux/update`. Updater resolves
+Subsequent checks and updates are performed through `sudo updater tui` for the one shared host instance. Updater resolves
 `repositories.gryphon.url` from Kernel Register, verifies the release signature and checksum,
 atomically swaps the app directory and verified systemd unit, restarts Gryphon,
 checks the client socket, and restores both previous versions if health does
