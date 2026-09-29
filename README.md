@@ -120,18 +120,24 @@ Release tags use `gryphon-vMAJOR.MINOR.PATCH` and the version sequence starts
 at `0.0.1`. A plain `v0.0.1`-style tag runs verification-only CI and cannot
 publish or mutate a release. The release workflow produces
 runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
-first installation, use `sudo updater tui` → Gryphon → Install Gryphon.
+first installation, use the signed release's `bootstrap.sh` on an empty host
+or `sudo updater tui` → Gryphon → Install Gryphon. Both paths install or reuse
+one host Updater and one Gryphon daemon; neither requires a registered service
+or Kernel connection for local process health. The `0.1.6` release declares
+`hostDependencyProtocol: 1` for this headless contract. Older archives are
+rejected by new host installers.
 Gryphon's private signing key remains only in GitHub Secrets; the protected
 release job signs the manifest and publishes the public counterpart. The
 exact-version Updater bootstrap verifies its own signed installer before
 accepting Gryphon's pinned public key from inside that installer. It creates
 `/etc/exocortex/release-trust/gryphon.pem` and fails on an existing mismatching
 key. Updater then verifies Gryphon's manifest before any archive download,
-provisions the host daemon and connects Saturn. No `scp`, manual release-key
+provisions the host daemon. Saturn and other consumers supply their own client
+credentials when installed. No `scp`, manual release-key
 fingerprint or public key downloaded beside the helper manifest is used. A
 healthy existing host instance is reused. Gryphon keeps its own mode-`0600`
-`/etc/gryphon/gryphon.env`; provision Kernel URL/token so subsequent public and
-adapter addresses are resolved through Kernel.
+`/etc/gryphon/gryphon.env`. Kernel discovery and Telegram bot linking can be
+configured later; the daemon stays healthy while they are pending.
 
 The CI workflow also accepts plain `v*` tags for verification-only evidence;
 only the exact `gryphon-v*` namespace reaches the protected release job.
@@ -139,7 +145,8 @@ Legacy `gryphon-linux-v*` tags remain immutable historical records and no
 longer trigger publication.
 
 Subsequent checks and updates are performed through `sudo updater tui` for the one shared host instance. Updater resolves
-`repositories.gryphon.url` from Kernel Register, verifies the release signature and checksum,
+`repositories.gryphon.url` through Updater's own scoped Kernel connection, or
+the Gryphon URL saved in root TUI when that connection is unavailable. It verifies the release signature and checksum,
 atomically swaps the app directory and verified systemd unit, restarts Gryphon,
 checks the client socket, and restores both previous versions if health does
 not recover. The unit preserves `/run/gryphon` across restarts so connected

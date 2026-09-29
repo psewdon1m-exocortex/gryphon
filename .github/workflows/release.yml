@@ -59,6 +59,19 @@ jobs:
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: node scripts/sign-release.mjs --export-public-key release/gryphon.pem release/gryphon-linux-release-linux-x64.json release/gryphon-linux-release-linux-arm64.json
+      - name: Require a pinned Updater and build the exact helper bootstrap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          updater_version="$(cat .release/updater.version)"
+          mkdir -p updater-input
+          gh release download "updater-v${updater_version}" --repo psewdon1m-exocortex/updater --dir updater-input --pattern "updater-${updater_version}-install.tar.gz"
+          printf '%s  %s\n' "$(cat .release/updater.sha256)" "updater-input/updater-${updater_version}-install.tar.gz" | sha256sum -c -
+          tar -xzf "updater-input/updater-${updater_version}-install.tar.gz" -C updater-input
+          updater-input/updater/updater-linux-amd64 host capabilities | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get("schema")=="exocortex.updater.host-dependencies.v1" and d.get("api_version")==1'
+          python3 scripts/build-host-bootstrap.py gryphon "${GITHUB_REF_NAME#gryphon-v}" release/gryphon.pem release/bootstrap.sh
+          sh -n release/bootstrap.sh
       - name: Publish immutable release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,5 +81,5 @@ jobs:
             echo "Release $GITHUB_REF_NAME already exists and will not be replaced." >&2
             exit 1
           fi
-          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json release/*.pem \
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.json release/*.pem release/bootstrap.sh \
             --verify-tag --latest=false --title "$GITHUB_REF_NAME" --generate-notes

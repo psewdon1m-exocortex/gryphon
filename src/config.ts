@@ -5,9 +5,9 @@ function packageVersion(): string {
   try {
     const packageFile = new URL("../package.json", import.meta.url);
     const value = JSON.parse(fs.readFileSync(packageFile, "utf8")) as { readonly version?: unknown };
-    return typeof value.version === "string" ? value.version : "0.1.5";
+    return typeof value.version === "string" ? value.version : "0.1.6";
   } catch {
-    return "0.1.5";
+    return "0.1.6";
   }
 }
 
@@ -44,7 +44,6 @@ export function loadConfig(): GryphonConfig {
     const url = new URL(kernelOrigin);
     if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error("GRYPHON_KERNEL_URL must be a private HTTPS origin");
   }
-  if (process.env.NODE_ENV === "production" && (!kernelOrigin || !kernelTokenFile)) throw new Error("Gryphon production discovery requires Kernel URL and protected token file");
   return {
     version: process.env.GRYPHON_VERSION ?? packageVersion(),
     dataDirectory,
