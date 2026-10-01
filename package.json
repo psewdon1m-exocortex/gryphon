@@ -1,6 +1,6 @@
 {
   "name": "@exocortex/gryphon",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "hostDependencyProtocol": 1,
   "private": true,
   "type": "module",

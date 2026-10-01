@@ -26,9 +26,9 @@ failed, unknown or unsupported `N/A` evidence blocks publication. This is a
 normative release requirement; until the repository workflow generates and
 enforces that report, the release pipeline remains an implementation gap.
 
-Gryphon is the single Telegram transport gateway for Exocortex services. It owns bot tokens, webhooks, update deduplication, bot identity bindings, service connections, callback buttons and outbound delivery. Chronos, Saturn and Mastermind expose authenticated internal command adapters and do not talk to Telegram directly.
+Gryphon is the single Telegram transport gateway for Exocortex services. It owns adapter provider tokens, webhooks, update deduplication, Telegram identity bindings, service connections, callback buttons and outbound delivery. Chronos, Saturn and Mastermind expose authenticated internal command endpoints and do not talk to Telegram directly.
 
-One bot is paired to one Telegram account with a single `/link CODE` in Updater TUI. Each service owner then selects any paired bot in that service's Settings. Selecting it grants that bot's paired account access to the service; several services may select the same bot. A service owner can revoke that service's binding without disconnecting the bot or changing access to other services.
+One adapter is paired to one Telegram account with a single `/link CODE` issued in Updater TUI. Each service owner then selects a paired adapter in that service's Settings. Selecting it grants the paired account access to the service; several services may select the same adapter. A service owner can revoke that service's binding without disconnecting the adapter or changing access to other services.
 
 ## Run locally
 
@@ -50,13 +50,13 @@ docker network create exocortex-services
 
 The public listener accepts only Telegram webhooks. Services use an authenticated, service-scoped Unix socket for status, linking and notifications. Administrative operations use a different Unix socket (or Windows named pipe) and are intentionally not exposed over TCP.
 
-Use `sudo updater tui` on the host to install and update the shared Gryphon instance and to register a bot. Initial installation may ask for a registered service to supply Kernel release configuration and enroll that service; update checks and bot registration do not ask for one. Enter the bot alias and Telegram token in the TUI. Updater sends the token only to Gryphon's root-only admin socket. Gryphon verifies the bot with Telegram, registers the webhook and stores its protected token copy. The TUI displays a short-lived `/link CODE`; send it to the bot from the Telegram account that should own it. The TUI's bot list shows when pairing is complete.
+Use `sudo updater tui` on the host to install, check and update the shared Gryphon instance and to register an adapter. None of these host operations selects a consuming service. Updater uses its own scoped Kernel release-source connection, with the configured Gryphon fallback during a Kernel outage. Enter the adapter alias and Telegram provider token in the TUI. Updater sends the token only to Gryphon's root-only admin socket. Gryphon verifies the adapter with Telegram, registers the webhook and stores its protected token copy. The TUI displays a short-lived `/link CODE`; send it to the adapter from the Telegram account that should own it. The TUI adapter list shows when pairing is complete.
 
 Each service installer provisions one service credential under
 `/etc/gryphon/clients/<service>.token` and mounts the same file read-only into
-that service. In Chronos, Saturn or Mastermind Settings, **Link service function** lists paired bots and stores only the selected bot, the fixed service command prefix and the service adapter URL. The service connection receives the paired Telegram identity automatically. No second `/link` is needed. If a service binding is later revoked in Settings, **Link Telegram account** restores the paired identity for that service.
+that service. In Chronos, Saturn or Mastermind Settings, **Link service function** lists paired adapters and stores only the selected adapter, the fixed service command prefix and the service command endpoint URL. The service connection receives the paired Telegram identity automatically. No second `/link` is needed. If a service binding is later revoked in Settings, **Link Telegram account** restores the paired identity for that service.
 
-Existing service bindings remain in place during upgrade. When all existing connections to a bot use the same Telegram identity, Gryphon pairs that bot automatically. If they disagree, the operator must pair the bot in the TUI before adding a new service connection. Deploy Gryphon and Updater before updating the service interfaces; older service clients may still request service-level link codes, which the new Gryphon rejects.
+Existing service bindings remain in place during upgrade. When all existing connections to an adapter use the same Telegram identity, Gryphon pairs that adapter automatically. If they disagree, the operator must pair it in the TUI before adding a new service connection. Deploy Gryphon and Updater before updating the service interfaces; older service clients may still request service-level link codes, which the new Gryphon rejects.
 
 Services publish their user-facing commands through the authenticated client
 socket:
@@ -123,7 +123,7 @@ runtime-labelled archives plus `exocortex.gryphon.release.v1` manifests. For a
 first installation, use the signed release's `bootstrap.sh` on an empty host
 or `sudo updater tui` → Gryphon → Install Gryphon. Both paths install or reuse
 one host Updater and one Gryphon daemon; neither requires a registered service
-or Kernel connection for local process health. The `0.1.6` release declares
+or Kernel connection for local process health. The `0.1.7` release declares
 `hostDependencyProtocol: 1` for this headless contract. Older archives are
 rejected by new host installers.
 Gryphon's private signing key remains only in GitHub Secrets; the protected
